@@ -1,0 +1,2014 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DCV 企业管理平台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230284c7'/%3E%3Crect x='7' y='9' width='18' height='12' rx='2' fill='none' stroke='white' stroke-width='2'/%3E%3Cpath d='M12 25h8' stroke='white' stroke-width='2'/%3E%3C/svg%3E" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<style>
+  body { background:#0b1120; }
+  .scrollbar::-webkit-scrollbar{width:8px;height:8px}
+  .scrollbar::-webkit-scrollbar-thumb{background:#334155;border-radius:4px}
+  th { font-weight:500; }
+  .row-sel { background: rgba(14,165,233,.08); }
+</style>
+</head>
+<body class="text-slate-100">
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// ============================================================
+// 基础：接口、格式化、会话
+// ============================================================
+let TOKEN = localStorage.getItem("dcv_token") || "";
+let ME = JSON.parse(localStorage.getItem("dcv_me") || "null");
+const RANK = { viewer: 0, operator: 1, admin: 2 };
+const ROLE_ZH = { viewer: "只读", operator: "运维", admin: "管理员" };
+const can = (r) => ME && RANK[ME.role] >= RANK[r];
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  if (TOKEN) { headers["Authorization"] = "Bearer " + TOKEN; headers["X-Auth-Token"] = TOKEN; }
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401) { logout(); throw new Error("登录已过期，请重新登录"); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : ("请求失败 " + res.status));
+  return data;
+}
+const post = (p, b) => api(p, { method: "POST", body: JSON.stringify(b || {}) });
+const put = (p, b) => api(p, { method: "PUT", body: JSON.stringify(b || {}) });
+const del = (p) => api(p, { method: "DELETE" });
+function logout() { TOKEN = ""; ME = null; localStorage.removeItem("dcv_token"); localStorage.removeItem("dcv_me"); window.dispatchEvent(new Event("dcv-logout")); }
+
+const fmtT = (v) => { if (!v) return "—"; const d = typeof v === "number" ? new Date(v * 1000) : new Date(v); return d.toLocaleString("zh-CN", { hour12: false }); };
+const fmtRel = (ts) => { if (!ts) return "—"; const s = Math.max(0, Date.now() / 1000 - ts); if (s < 60) return "刚刚"; if (s < 3600) return Math.floor(s / 60) + " 分钟前"; if (s < 86400) return Math.floor(s / 3600) + " 小时前"; return Math.floor(s / 86400) + " 天前"; };
+function fmtDur(sec) { if (sec === null || sec === undefined) return "—"; sec = Math.max(0, Math.floor(sec)); const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60); const p = []; if (d) p.push(d + "天"); if (h || d) p.push(h + "小时"); p.push(m + "分"); return p.join(""); }
+const uptimeOf = (inst) => inst.state === "running" && inst.running_since ? fmtDur((Date.now() - new Date(inst.running_since)) / 1000) : "—";
+const gib = (mib) => mib ? (mib / 1024).toFixed(mib % 1024 === 0 ? 0 : 1) + " GiB" : "—";
+const pct = (a, b) => (a !== null && a !== undefined && b) ? Math.round(a * 100 / b) : null;
+
+// ============================================================
+// 通用组件
+// ============================================================
+function Btn({ children, onClick, color = "slate", disabled, small, title, type }) {
+  const c = { slate: "bg-slate-700 hover:bg-slate-600", green: "bg-emerald-600 hover:bg-emerald-500", red: "bg-rose-600 hover:bg-rose-500", amber: "bg-amber-600 hover:bg-amber-500", blue: "bg-sky-600 hover:bg-sky-500", indigo: "bg-indigo-600 hover:bg-indigo-500", ghost: "bg-transparent hover:bg-slate-800 border border-slate-700" };
+  return <button type={type||"button"} title={title} onClick={onClick} disabled={disabled} className={`${c[color]} ${small ? "px-2.5 py-1 text-xs" : "px-3.5 py-1.5 text-sm"} rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed transition whitespace-nowrap`}>{children}</button>;
+}
+
+function Modal({ title, onClose, children, width = "max-w-xl", footer }) {
+  useEffect(() => { const h = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onMouseDown={onClose}>
+      <div className={`bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl ${width} w-full max-h-[90vh] flex flex-col`} onMouseDown={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-700">
+          <h3 className="font-semibold">{title}</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">×</button>
+        </div>
+        <div className="p-5 overflow-y-auto scrollbar">{children}</div>
+        {footer && <div className="px-5 py-3 border-t border-slate-700 flex justify-end gap-2">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
+function Drawer({ title, sub, onClose, children }) {
+  useEffect(() => { const h = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end bg-black/40" onMouseDown={onClose}>
+      <div className="w-full max-w-3xl h-full bg-slate-900 border-l border-slate-700 flex flex-col shadow-2xl" onMouseDown={e => e.stopPropagation()}>
+        <div className="flex items-start justify-between px-5 py-4 border-b border-slate-700">
+          <div className="min-w-0"><div className="font-semibold text-lg truncate">{title}</div>{sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}</div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-2xl leading-none ml-3">×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// 全局提示与确认
+const Toast = { push: () => {} };
+function Toasts() {
+  const [items, setItems] = useState([]);
+  useEffect(() => { Toast.push = (msg, kind = "ok") => { const id = Math.random(); setItems(x => [...x, { id, msg, kind }]); setTimeout(() => setItems(x => x.filter(i => i.id !== id)), kind === "err" ? 7000 : 3500); }; }, []);
+  return <div className="fixed bottom-5 right-5 z-[60] space-y-2 w-96">{items.map(t =>
+    <div key={t.id} className={`px-4 py-2.5 rounded-lg shadow-lg text-sm border ${t.kind === "err" ? "bg-rose-950 border-rose-700 text-rose-200" : t.kind === "warn" ? "bg-amber-950 border-amber-700 text-amber-200" : "bg-emerald-950 border-emerald-700 text-emerald-200"}`}>{t.msg}</div>)}</div>;
+}
+const ok = (m) => Toast.push(m, "ok"), fail = (m) => Toast.push(m, "err"), warn = (m) => Toast.push(m, "warn");
+
+const Confirm = { ask: () => Promise.resolve(false) };
+function ConfirmHost() {
+  const [st, setSt] = useState(null); const [typed, setTyped] = useState("");
+  useEffect(() => { Confirm.ask = (o) => new Promise(res => { setTyped(""); setSt({ ...o, res }); }); }, []);
+  if (!st) return null;
+  const close = (v) => { st.res(v); setSt(null); };
+  const blocked = st.typeToConfirm && typed !== st.typeToConfirm;
+  return (
+    <Modal title={st.title || "请确认"} onClose={() => close(false)} footer={<>
+      <Btn onClick={() => close(false)}>取消</Btn>
+      <Btn color={st.danger ? "red" : "blue"} disabled={blocked} onClick={() => close(true)}>{st.okText || "确认"}</Btn></>}>
+      <div className="text-sm text-slate-300 whitespace-pre-line">{st.message}</div>
+      {st.list && st.list.length > 0 && <div className="mt-3 max-h-40 overflow-y-auto scrollbar bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-slate-400">{st.list.join("、")}</div>}
+      {st.typeToConfirm && <div className="mt-4"><div className="text-xs text-slate-400 mb-1">请输入 <span className="font-mono text-amber-300">{st.typeToConfirm}</span> 以确认</div>
+        <input autoFocus value={typed} onChange={e => setTyped(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 font-mono" /></div>}
+    </Modal>
+  );
+}
+
+const Input = (p) => <input {...p} className={"bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-sky-500 disabled:opacity-50 " + (p.className || "")} />;
+const Select = ({ children, ...p }) => <select {...p} className={"bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-sky-500 " + (p.className || "")}>{children}</select>;
+const Field = ({ label, children, hint }) => <label className="block"><div className="text-xs text-slate-400 mb-1">{label}</div>{children}{hint && <div className="text-[11px] text-slate-500 mt-1">{hint}</div>}</label>;
+
+// ============================================================
+// 状态徽标
+// ============================================================
+const STATE = { running: ["运行中", "bg-emerald-500"], stopped: ["已停止", "bg-slate-500"], pending: ["启动中", "bg-amber-400 animate-pulse"], stopping: ["停止中", "bg-amber-400 animate-pulse"], "shutting-down": ["删除中", "bg-rose-400 animate-pulse"] };
+const StateDot = ({ state }) => { const [t, c] = STATE[state] || [state, "bg-slate-500"]; return <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className={`w-2 h-2 rounded-full ${c}`} />{t}</span>; };
+const HEALTH = { ok: ["正常", "text-emerald-300 bg-emerald-500/10 border-emerald-500/30"], warn: ["警告", "text-amber-300 bg-amber-500/10 border-amber-500/30"], critical: ["严重", "text-rose-300 bg-rose-500/10 border-rose-500/40"], unknown: ["未知", "text-slate-400 bg-slate-500/10 border-slate-600"] };
+const COMP = { compliant: ["合规", "text-emerald-300 bg-emerald-500/10 border-emerald-500/30"], drift: ["配置偏离", "text-amber-300 bg-amber-500/10 border-amber-500/30"], unmanaged: ["未配置", "text-slate-300 bg-slate-500/10 border-slate-600"], unknown: ["—", "text-slate-500 border-transparent"] };
+const Pill = ({ map, k, title }) => { const [t, c] = map[k] || [k, ""]; return <span title={title} className={`px-1.5 py-0.5 rounded border text-[11px] whitespace-nowrap ${c}`}>{t}</span>; };
+const LEVEL = { "低": "text-emerald-300 border-emerald-500/40", "中": "text-sky-300 border-sky-500/40", "高": "text-amber-300 border-amber-500/40", "最高": "text-rose-300 border-rose-500/40" };
+const LevelTag = ({ level }) => level ? <span className={`text-[10px] px-1 rounded border ${LEVEL[level] || "text-slate-400 border-slate-600"}`}>{level}</span> : null;
+const RULE = { allow: ["允许", "text-emerald-300"], disallow: ["默认禁止", "text-amber-300"], deny: ["强制禁止", "text-rose-300"] };
+
+function Bar({ value, warnAt = 80, critAt = 92 }) {
+  if (value === null || value === undefined) return <span className="text-slate-600">—</span>;
+  const c = value >= critAt ? "bg-rose-500" : value >= warnAt ? "bg-amber-500" : "bg-sky-500";
+  return <div className="flex items-center gap-1.5 min-w-[70px]"><div className="flex-1 h-1.5 bg-slate-800 rounded"><div className={`h-1.5 rounded ${c}`} style={{ width: Math.min(100, value) + "%" }} /></div><span className="text-[11px] text-slate-400 w-8 text-right">{value}%</span></div>;
+}
+
+// 可复用：按分组多选服务器（用于定时任务、应用模板等）
+function ServerPicker({ servers, value, onChange, filter }) {
+  const [q, setQ] = useState("");
+  const list = servers.filter(s => (!filter || filter(s)) && (!q || [s.name, s.instance_id, s.group, s.assignee, s.department].join(" ").toLowerCase().includes(q.toLowerCase())));
+  const groups = {}; list.forEach(s => { (groups[s.group || "未分组"] = groups[s.group || "未分组"] || []).push(s); });
+  const toggle = (ids, on) => { const set = new Set(value); ids.forEach(i => on ? set.add(i) : set.delete(i)); onChange([...set]); };
+  return (
+    <div className="border border-slate-700 rounded-lg">
+      <div className="flex items-center gap-2 p-2 border-b border-slate-700">
+        <Input placeholder="搜索名称、使用人、部门" value={q} onChange={e => setQ(e.target.value)} className="flex-1" />
+        <Btn small onClick={() => toggle(list.map(s => s.instance_id), true)}>全选结果</Btn>
+        <Btn small onClick={() => onChange([])}>清空</Btn>
+        <span className="text-xs text-slate-400 whitespace-nowrap">已选 {value.length} 台</span>
+      </div>
+      <div className="max-h-56 overflow-y-auto scrollbar p-2 space-y-2">
+        {Object.keys(groups).sort().map(g => {
+          const ids = groups[g].map(s => s.instance_id); const all = ids.every(i => value.includes(i));
+          return <div key={g}>
+            <label className="flex items-center gap-2 text-xs text-slate-400 mb-1 cursor-pointer"><input type="checkbox" checked={all} onChange={e => toggle(ids, e.target.checked)} />{g}（{ids.length}）</label>
+            <div className="grid grid-cols-2 gap-1 pl-5">{groups[g].map(s =>
+              <label key={s.instance_id} className={`flex items-center gap-2 px-2 py-1 rounded text-sm cursor-pointer ${value.includes(s.instance_id) ? "bg-sky-600/20" : "hover:bg-slate-800"}`}>
+                <input type="checkbox" checked={value.includes(s.instance_id)} onChange={e => toggle([s.instance_id], e.target.checked)} />
+                <span className="truncate">{s.name || s.instance_id}</span>{s.assignee && <span className="text-[11px] text-slate-500 truncate">{s.assignee}</span>}
+              </label>)}</div>
+          </div>;
+        })}
+        {list.length === 0 && <div className="text-center text-slate-500 text-sm py-4">没有匹配的服务器</div>}
+      </div>
+    </div>
+  );
+}
+
+// 权限规则编辑器（模板与单台自定义共用）
+function PermEditor({ features, spec, onChange, readOnly }) {
+  const setAll = (r) => { const n = {}; features.groups.forEach(g => g.features.forEach(f => n[f.key] = r)); ["display", "keyboard", "mouse", "pointer"].forEach(k => n[k] = "allow"); onChange(n); };
+  return (
+    <div>
+      {!readOnly && <div className="flex gap-2 mb-3 justify-end">
+        <Btn small color="ghost" onClick={() => setAll("allow")}>全部允许</Btn>
+        <Btn small color="ghost" onClick={() => setAll("disallow")}>全部默认禁止</Btn>
+        <Btn small color="ghost" onClick={() => setAll("deny")}>全部强制禁止</Btn>
+      </div>}
+      <div className="grid md:grid-cols-2 gap-3">
+        {features.groups.map(g => (
+          <div key={g.group} className="bg-slate-800/40 border border-slate-700 rounded-xl p-3">
+            <div className="text-xs font-medium text-slate-400 mb-2">{g.group}</div>
+            <div className="space-y-1">{g.features.map(f => {
+              const r = spec[f.key] || "allow";
+              return <div key={f.key} className="flex items-center justify-between gap-2 text-sm">
+                <span className="truncate" title={f.key}>{f.label}</span>
+                {readOnly ? <span className={`text-xs ${RULE[r][1]}`}>{RULE[r][0]}</span> :
+                  <select value={r} onChange={e => onChange({ ...spec, [f.key]: e.target.value })} className={`bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs ${RULE[r][1]}`}>
+                    <option value="allow">允许</option><option value="disallow">默认禁止</option><option value="deny">强制禁止</option>
+                  </select>}
+              </div>;
+            })}</div>
+          </div>
+        ))}
+      </div>
+      <div className="text-[11px] text-slate-500 mt-3">「默认禁止」可被其他规则放开；「强制禁止」不可被放开，适用于涉密场景。</div>
+    </div>
+  );
+}
+// ============================================================
+// 服务器列表
+// ============================================================
+const COLS_KEY = "dcv_cols";
+// 常用区域中文名（未列出的直接显示区域代码）
+const REGION_ZH = { "eu-central-1": "法兰克福", "eu-west-1": "爱尔兰", "eu-west-2": "伦敦", "eu-west-3": "巴黎", "eu-north-1": "斯德哥尔摩", "eu-south-1": "米兰",
+  "us-east-1": "弗吉尼亚北部", "us-east-2": "俄亥俄", "us-west-1": "加利福尼亚北部", "us-west-2": "俄勒冈", "ca-central-1": "加拿大中部", "sa-east-1": "圣保罗",
+  "ap-northeast-1": "东京", "ap-northeast-2": "首尔", "ap-northeast-3": "大阪", "ap-southeast-1": "新加坡", "ap-southeast-2": "悉尼", "ap-south-1": "孟买",
+  "ap-east-1": "香港", "me-central-1": "阿联酋", "il-central-1": "特拉维夫", "af-south-1": "开普敦" };
+const regionName = (r) => r ? (REGION_ZH[r] ? `${REGION_ZH[r]}（${r}）` : r) : "—";
+const regionShort = (r) => REGION_ZH[r] || r || "—";
+const multiRegion = () => !!(CFG && CFG.regions && CFG.regions.length > 1);
+// 机型单价（美元/小时，Windows 按需价格；不含磁盘、公网 IP 与流量）
+let PRICES = {};
+const WORK_HOURS = 176;   // 每天 8 小时 × 22 个工作日
+const FULL_HOURS = 730;
+const priceOf = (region, type) => { const r = PRICES[region || (CFG && CFG.region)] || {}; return r[type] ?? null; };
+const usd = (v, d = 2) => v == null ? "—" : "$" + (v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(d));
+const hourly = (p) => p == null ? "暂无报价" : `$${p.toFixed(3)}/小时`;
+const diffPct = (p, base) => (p == null || !base) ? "" : (p === base ? "" : `${p > base ? "+" : ""}${Math.round((p / base - 1) * 100)}%`);
+function PriceTag({ region, type, base, compact }) {
+  const p = priceOf(region, type); if (p == null) return <span className="text-[11px] text-slate-500">暂无报价</span>;
+  const b = base ? priceOf(region, base) : null; const d = diffPct(p, b);
+  return <span className="text-[11px] text-slate-400 whitespace-nowrap" title={`按需价格（Windows）：${hourly(p)}；每天 8 小时×22 天约 ${usd(p * WORK_HOURS, 0)}/月，全天运行约 ${usd(p * FULL_HOURS, 0)}/月。不含磁盘、公网 IP 与流量费用。`}>
+    {hourly(p)}{!compact && <> · 约 {usd(p * WORK_HOURS, 0)}/月</>}{d && <span className={`ml-1 ${p > b ? "text-amber-300" : "text-emerald-300"}`}>{d}</span>}</span>;
+}
+const capUrl = (region, refresh) => `/api/capacity?region=${encodeURIComponent(region || (CFG && CFG.region) || "")}${refresh ? "&refresh=1" : ""}`;
+
+const ALL_COLS = [
+  ["region", "区域"], ["group", "分组"], ["assignee", "使用人"], ["type", "机型"], ["uptime", "运行时长"], ["conn", "连接"],
+  ["cpu", "CPU"], ["mem", "内存"], ["gpu", "显存"], ["disk", "磁盘"], ["perm", "权限配置"], ["share", "共享盘"], ["health", "健康"], ["ip", "公网 IP"],
+];
+
+function Summary({ s, setQuick, quick }) {
+  const card = (key, label, value, cls, hint) => (
+    <button onClick={() => setQuick(quick === key ? "" : key)} title={hint}
+      className={`text-left rounded-xl border px-3.5 py-2.5 transition ${quick === key ? "border-sky-500 bg-sky-500/10" : "border-slate-700 bg-slate-900 hover:border-slate-500"}`}>
+      <div className="text-[11px] text-slate-400">{label}</div><div className={`text-xl font-semibold mt-0.5 ${cls || ""}`}>{value}</div>
+    </button>);
+  return (
+    <div className="grid grid-cols-4 lg:grid-cols-8 gap-2.5 mb-4">
+      {card("", "全部服务器", s.total)}
+      {card("running", "运行中", s.running, "text-emerald-300")}
+      {card("stopped", "已停止", s.stopped, "text-slate-300")}
+      {card("connected", "在线连接", s.connections, "text-sky-300", "当前正在连接 DCV 的会话数")}
+      {card("critical", "严重告警", s.critical, s.critical ? "text-rose-400" : "", "开机失败（容量不足）、DCV 服务停止、没有用户会话等，用户无法使用")}
+      {card("warn", "警告", s.warn, s.warn ? "text-amber-300" : "", "SSM 离线、磁盘不足、用户为管理员等")}
+      {card("drift", "权限不合规", s.drift + s.unmanaged, (s.drift + s.unmanaged) ? "text-amber-300" : "", "主机实际配置与平台不一致、模板有更新或未配置权限")}
+      {card("idle", "闲置", s.idle, s.idle ? "text-violet-300" : "", "运行中但长时间无人连接，建议关机节省费用")}
+    </div>);
+}
+
+function ServersPage({ data, reload, features, templates, openServer }) {
+  const [q, setQ] = useState(""); const [group, setGroup] = useState(""); const [dept, setDept] = useState("");
+  const [tplF, setTplF] = useState(""); const [quick, setQuick] = useState(""); const [regionF, setRegionF] = useState("");
+  const [sel, setSel] = useState([]); const [sort, setSort] = useState(["group", 1]);
+  const [cols, setCols] = useState(() => JSON.parse(localStorage.getItem(COLS_KEY) || "null") || ALL_COLS.map(c => c[0]));
+  const [dlg, setDlg] = useState(null); const [colMenu, setColMenu] = useState(false);
+  useEffect(() => localStorage.setItem(COLS_KEY, JSON.stringify(cols)), [cols]);
+  const all = data ? data.instances : [];
+  const byId = useMemo(() => Object.fromEntries(all.map(i => [i.instance_id, i])), [all]);
+  useEffect(() => setSel(s => s.filter(id => byId[id])), [byId]);
+
+  const list = useMemo(() => {
+    let l = all.filter(i => {
+      if (regionF && i.region !== regionF) return false;
+      if (group && (i.group || "未分组") !== group) return false;
+      if (dept && i.department !== dept) return false;
+      if (tplF === "__none" && i.perm_mode === "template") return false;
+      if (tplF && tplF !== "__none" && String(i.template && i.template.id) !== tplF) return false;
+      if (quick === "running" && i.state !== "running") return false;
+      if (quick === "stopped" && i.state !== "stopped") return false;
+      if (quick === "connected" && !((i.inspection || {}).connections > 0)) return false;
+      if (quick === "critical" && i.health !== "critical") return false;
+      if (quick === "warn" && i.health !== "warn") return false;
+      if (quick === "drift" && !["drift", "unmanaged"].includes(i.compliance)) return false;
+      if (quick === "idle" && !i.idle) return false;
+      if (q) { const t = [i.name, i.instance_id, i.assignee, i.department, i.group, i.public_ip, i.private_ip, i.note, i.region, REGION_ZH[i.region], i.az].join(" ").toLowerCase(); if (!q.toLowerCase().split(/\s+/).every(w => t.includes(w))) return false; }
+      return true;
+    });
+    const [k, d] = sort; const val = (i) => ({ name: i.name, group: (i.group || "~") + i.name, assignee: i.assignee || "~", state: i.state, uptime: i.running_since || "", health: { critical: 0, warn: 1, ok: 2, unknown: 3 }[i.health], conn: -((i.inspection || {}).connections || 0), type: i.instance_type, region: (i.region || "") + i.az + i.name }[k] ?? i.name);
+    return [...l].sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : 0) * d);
+  }, [all, q, group, dept, tplF, quick, sort, regionF]);
+
+  const selInst = sel.map(id => byId[id]).filter(Boolean);
+  const allChecked = list.length > 0 && list.every(i => sel.includes(i.instance_id));
+  const toggleAll = () => setSel(allChecked ? sel.filter(id => !list.some(i => i.instance_id === id)) : [...new Set([...sel, ...list.map(i => i.instance_id)])]);
+  const th = (k, label, cls = "") => <th className={`px-2 py-2 text-left cursor-pointer select-none hover:text-slate-200 ${cls}`} onClick={() => setSort([k, sort[0] === k ? -sort[1] : 1])}>{label}{sort[0] === k ? (sort[1] > 0 ? " ↑" : " ↓") : ""}</th>;
+  const show = (c) => cols.includes(c);
+
+  async function batchPower(action) {
+    const zh = { start: "开机", stop: "关机", reboot: "重启" }[action];
+    const eligible = selInst.filter(i => action === "start" ? i.state === "stopped" : i.state === "running");
+    const connected = selInst.filter(i => action !== "start" && (i.inspection || {}).connections > 0);
+    if (!eligible.length) { warn(`所选服务器中没有可${zh}的（${action === "start" ? "需为已停止" : "需为运行中"}）`); return; }
+    const msg = `将对 ${eligible.length} 台服务器执行${zh}` + (selInst.length > eligible.length ? `，另有 ${selInst.length - eligible.length} 台状态不符将跳过` : "") + "。"
+      + (connected.length ? `\n\n注意：${connected.length} 台有用户正在连接，${zh}会中断其工作。` : "");
+    if (action === "start") { setDlg("start"); return; }
+    const needType = eligible.length >= 5;
+    if (!await Confirm.ask({ title: `批量${zh}`, message: msg, list: eligible.map(i => i.name || i.instance_id), danger: true, okText: `确认${zh}`, typeToConfirm: needType ? String(eligible.length) : null })) return;
+    try { const r = await post("/api/jobs/power", { instance_ids: selInst.map(i => i.instance_id), action }); ok(`已创建任务 #${r.job_id}，可在「任务中心」查看进度`); setSel([]); setTimeout(reload, 1500); }
+    catch (e) { fail(e.message); }
+  }
+  async function batchShareSync() {
+    try { const r = await post("/api/jobs/share-sync", { instance_ids: sel }); ok(`共享盘同步任务 #${r.job_id} 已开始，首次挂载需安装组件，约 1–2 分钟`); } catch (e) { fail(e.message); }
+  }
+  async function batchInspect() {
+    try { const r = await post("/api/jobs/inspect", { instance_ids: sel }); ok(`巡检任务 #${r.job_id} 已开始`); setTimeout(reload, 8000); } catch (e) { fail(e.message); }
+  }
+
+  const s = data ? data.summary : null;
+  return (
+    <div>
+      {data && data.region_errors && Object.keys(data.region_errors).length > 0 && <div className="mb-3 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-2 text-sm text-amber-200">
+        以下区域读取失败，显示的是上次结果：{Object.entries(data.region_errors).map(([r, e]) => `${regionShort(r)}（${e.slice(0, 80)}）`).join("；")}</div>}
+      {s && <Summary s={s} quick={quick} setQuick={setQuick} />}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <Input placeholder="搜索名称、使用人、部门、IP、实例 ID" value={q} onChange={e => setQ(e.target.value)} className="w-72" />
+        {multiRegion() && <Select value={regionF} onChange={e => setRegionF(e.target.value)}><option value="">全部区域</option>{CFG.regions.map(r => <option key={r} value={r}>{regionShort(r)}（{(s && s.regions && s.regions[r] ? s.regions[r].total : 0)} 台）</option>)}</Select>}
+        <Select value={group} onChange={e => setGroup(e.target.value)}><option value="">全部分组</option>{s && s.groups.map(g => <option key={g}>{g}</option>)}<option value="未分组">未分组</option></Select>
+        <Select value={dept} onChange={e => setDept(e.target.value)}><option value="">全部部门</option>{s && s.departments.map(g => <option key={g}>{g}</option>)}</Select>
+        <Select value={tplF} onChange={e => setTplF(e.target.value)}><option value="">全部权限配置</option>{templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}<option value="__none">未使用模板</option></Select>
+        {(q || group || dept || tplF || quick || regionF) && <Btn small color="ghost" onClick={() => { setQ(""); setGroup(""); setDept(""); setTplF(""); setQuick(""); setRegionF(""); }}>清除筛选</Btn>}
+        <div className="ml-auto flex items-center gap-2 relative">
+          <span className="text-xs text-slate-500">显示 {list.length} / {all.length} 台 · {data ? "更新于 " + new Date(data.generated_at * 1000).toLocaleTimeString("zh-CN", { hour12: false }) : ""}</span>
+          <Btn small color="ghost" onClick={() => setColMenu(!colMenu)}>列设置</Btn>
+          {colMenu && <div className="absolute right-0 top-8 z-20 bg-slate-900 border border-slate-700 rounded-lg p-2 shadow-xl w-40" onMouseLeave={() => setColMenu(false)}>
+            {ALL_COLS.map(([k, l]) => <label key={k} className="flex items-center gap-2 px-1 py-0.5 text-sm cursor-pointer"><input type="checkbox" checked={show(k)} onChange={e => setCols(e.target.checked ? [...cols, k] : cols.filter(c => c !== k))} />{l}</label>)}
+          </div>}
+        </div>
+      </div>
+
+      {sel.length > 0 && <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 bg-sky-950/90 backdrop-blur border border-sky-800 rounded-xl px-3 py-2 mb-3">
+        <span className="text-sm font-medium mr-1">已选 {sel.length} 台</span>
+        {can("operator") && <>
+          <Btn small color="green" onClick={() => batchPower("start")}>开机</Btn>
+          <Btn small color="red" onClick={() => batchPower("stop")}>关机</Btn>
+          <Btn small color="amber" onClick={() => batchPower("reboot")}>重启</Btn>
+          <span className="w-px h-5 bg-sky-800 mx-1" />
+          <Btn small color="indigo" onClick={() => setDlg("template")}>应用权限模板</Btn>
+          <Btn small onClick={() => setDlg("tags")}>设置分组/使用人</Btn>
+          <Btn small onClick={batchInspect}>立即巡检</Btn>
+          <Btn small onClick={batchShareSync} title="按平台配置挂载/卸载共享盘">同步共享盘</Btn>
+          <Btn small onClick={() => setDlg("fallback")} title="开机容量不足时自动改用的机型">备选机型</Btn>
+        </>}
+        {can("admin") && <Btn small onClick={() => setDlg("migrate")} title="整机迁移到有容量的可用区（需已关机）">迁移可用区</Btn>}
+        {can("admin") && <Btn small color="red" onClick={() => setDlg("terminate")} title="终止实例，不可恢复">删除服务器</Btn>}
+        {can("admin") && <Btn small onClick={() => setDlg("schedule")}>创建定时任务</Btn>}
+        <Btn small color="ghost" onClick={() => exportCsv(selInst)}>导出所选</Btn>
+        <button className="ml-auto text-xs text-slate-400 hover:text-white" onClick={() => setSel([])}>取消选择</button>
+      </div>}
+
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-x-auto scrollbar">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 border-b border-slate-700">
+            <tr>
+              <th className="pl-3 pr-1 py-2 w-8"><input type="checkbox" checked={allChecked} onChange={toggleAll} /></th>
+              {th("name", "名称")}{th("state", "状态")}
+              {show("region") && multiRegion() && th("region", "区域")}
+              {show("group") && th("group", "分组")}{show("assignee") && th("assignee", "使用人")}{show("type") && th("type", "机型")}
+              {show("uptime") && th("uptime", "运行时长")}{show("conn") && th("conn", "连接")}
+              {show("cpu") && <th className="px-2 py-2 text-left">CPU</th>}{show("mem") && <th className="px-2 py-2 text-left">内存</th>}
+              {show("gpu") && <th className="px-2 py-2 text-left">显存</th>}{show("disk") && <th className="px-2 py-2 text-left">磁盘</th>}
+              {show("perm") && <th className="px-2 py-2 text-left">权限配置</th>}{show("share") && <th className="px-2 py-2 text-left">共享盘</th>}{show("health") && th("health", "健康")}
+              {show("ip") && <th className="px-2 py-2 text-left">公网 IP</th>}
+              <th className="px-2 py-2 text-right pr-3">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map(i => <ServerRow key={i.instance_id} i={i} show={show} checked={sel.includes(i.instance_id)}
+              onCheck={v => setSel(v ? [...sel, i.instance_id] : sel.filter(x => x !== i.instance_id))} onOpen={() => openServer(i.instance_id)} reload={reload} />)}
+            {!data && <tr><td colSpan="20" className="text-center text-slate-500 py-12">加载中…</td></tr>}
+            {data && list.length === 0 && <tr><td colSpan="20" className="text-center text-slate-500 py-12">{all.length ? "没有符合筛选条件的服务器" : `未发现纳管服务器。给 EC2 实例打上标签 dcv=true 后刷新，或在「快照与镜像」中创建。`}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {dlg === "template" && <ApplyTemplateDialog servers={selInst} templates={templates} features={features} onClose={() => setDlg(null)} onDone={() => { setSel([]); setDlg(null); setTimeout(reload, 1500); }} />}
+      {dlg === "start" && <StartDialog servers={selInst} onClose={() => setDlg(null)} onDone={() => { setSel([]); setDlg(null); setTimeout(reload, 1500); }} />}
+      {dlg === "tags" && <TagsDialog servers={selInst} summary={s} onClose={() => setDlg(null)} onDone={() => { setDlg(null); reload(); }} />}
+      {dlg === "fallback" && <FallbackDialog servers={selInst} onClose={() => setDlg(null)} onDone={() => { setDlg(null); reload(); }} />}
+      {dlg === "terminate" && <TerminateDialog servers={selInst} onClose={() => setDlg(null)} onDone={() => { setSel([]); setDlg(null); setTimeout(reload, 2000); }} />}
+      {dlg === "migrate" && <MigrateDialog servers={selInst} onClose={() => setDlg(null)} onDone={() => { setSel([]); setDlg(null); setTimeout(reload, 1500); }} />}
+      {dlg === "schedule" && <ScheduleDialog servers={all} preselect={sel} onClose={() => setDlg(null)} onDone={() => setDlg(null)} />}
+    </div>
+  );
+}
+
+function ServerRow({ i, show, checked, onCheck, onOpen, reload }) {
+  const x = (i.inspection && !i.inspection.stale) ? i.inspection : null;
+  const memPct = x ? pct(x.mem_total_mb - x.mem_free_mb, x.mem_total_mb) : null;
+  const gpuPct = x ? pct(x.gpu_mem_used, x.gpu_mem_total) : null;
+  const diskPct = x ? pct(x.disk_total_gb - x.disk_free_gb, x.disk_total_gb) : null;
+  const tip = [...i.alerts.map(a => a.message), ...i.compliance_reasons].join("\n");
+  const power = async (e, action) => {
+    e.stopPropagation(); const zh = { start: "开机", stop: "关机" }[action];
+    if (action === "stop" && !await Confirm.ask({ title: "关机", message: `确认关闭 ${i.name}？` + ((x && x.connections) ? `\n\n当前有 ${x.connections} 个用户正在连接，关机会中断其工作。` : ""), danger: true, okText: "确认关机" })) return;
+    try { await post(`/api/instances/${i.instance_id}/power`, { action }); ok(`${i.name} ${zh}指令已提交`); setTimeout(reload, 1500); } catch (err) { fail(err.message); }
+  };
+  return (
+    <tr className={`border-b border-slate-800 hover:bg-slate-800/50 cursor-pointer ${checked ? "row-sel" : ""}`} onClick={onOpen}>
+      <td className="pl-3 pr-1 py-2" onClick={e => e.stopPropagation()}><input type="checkbox" checked={checked} onChange={e => onCheck(e.target.checked)} /></td>
+      <td className="px-2 py-2 max-w-[220px]"><div className="font-medium truncate">{i.name || "（未命名）"}</div><div className="text-[11px] text-slate-500 font-mono">{i.instance_id}</div></td>
+      <td className="px-2 py-2 whitespace-nowrap"><StateDot state={i.state} />{i.busy && <span className="ml-1.5 text-[10px] text-sky-300">任务中</span>}</td>
+      {show("region") && multiRegion() && <td className="px-2 py-2 whitespace-nowrap text-slate-300">{regionShort(i.region)}<div className="text-[11px] text-slate-500">{i.az}</div></td>}
+      {show("group") && <td className="px-2 py-2 whitespace-nowrap text-slate-300">{i.group || <span className="text-slate-600">—</span>}</td>}
+      {show("assignee") && <td className="px-2 py-2 whitespace-nowrap"><div>{i.assignee || <span className="text-slate-600">—</span>}</div>{i.department && <div className="text-[11px] text-slate-500">{i.department}</div>}</td>}
+      {show("type") && <td className="px-2 py-2 whitespace-nowrap text-slate-300">{i.instance_type}<div className="text-[11px] text-slate-500">{i.cpu}C / {gib(i.memory_mib)}{priceOf(i.region, i.instance_type) != null && ` · $${priceOf(i.region, i.instance_type).toFixed(3)}/时`}</div></td>}
+      {show("uptime") && <td className="px-2 py-2 whitespace-nowrap text-slate-300">{uptimeOf(i)}{i.idle && <div className="text-[11px] text-violet-300">闲置</div>}</td>}
+      {show("conn") && <td className="px-2 py-2 text-center">{x ? (x.connections > 0 ? <span className="text-sky-300 font-medium">{x.connections}</span> : <span className="text-slate-500">0</span>) : <span className="text-slate-600">—</span>}</td>}
+      {show("cpu") && <td className="px-2 py-2"><Bar value={x ? x.cpu : null} /></td>}
+      {show("mem") && <td className="px-2 py-2"><Bar value={memPct} /></td>}
+      {show("gpu") && <td className="px-2 py-2"><Bar value={gpuPct} /></td>}
+      {show("disk") && <td className="px-2 py-2"><Bar value={diskPct} warnAt={85} critAt={92} /></td>}
+      {show("perm") && <td className="px-2 py-2 whitespace-nowrap">
+        {i.template ? <span className="inline-flex items-center gap-1">{i.template.name}<LevelTag level={i.template.level} /></span> : i.perm_mode === "custom" ? <span className="text-slate-300">自定义</span> : <span className="text-slate-500">未配置</span>}
+        {i.compliance !== "unknown" && <div className="mt-0.5"><Pill map={COMP} k={i.compliance} title={i.compliance_reasons.join("\n")} /></div>}
+      </td>}
+      {show("share") && <td className="px-2 py-2 whitespace-nowrap"><ShareChips rows={i.shares} /></td>}
+      {show("health") && <td className="px-2 py-2 whitespace-nowrap" title={tip}><Pill map={HEALTH} k={i.health} />{i.alerts.length > 0 && <span className="text-[11px] text-slate-500 ml-1">{i.alerts.length}</span>}</td>}
+      {show("ip") && <td className="px-2 py-2 font-mono text-xs text-slate-400">{i.public_ip || "—"}</td>}
+      <td className="px-2 py-2 pr-3 text-right whitespace-nowrap" onClick={e => e.stopPropagation()}>
+        {i.dcv_url && i.state === "running" && <a href={i.dcv_url} target="_blank" className="text-xs text-sky-400 hover:underline mr-2">连接</a>}
+        {can("operator") && (i.state === "stopped" ? <Btn small color={i.start_failed ? "amber" : "green"} onClick={e => { if (i.start_failed) { e.stopPropagation(); onOpen(); } else power(e, "start"); }} disabled={i.busy}>{i.start_failed ? "开机失败" : "开机"}</Btn>
+          : i.state === "running" ? <Btn small color="ghost" onClick={e => power(e, "stop")} disabled={i.busy}>关机</Btn> : null)}
+      </td>
+    </tr>
+  );
+}
+
+function exportCsv(rows) {
+  const head = ["名称", "实例ID", "状态", "区域", "可用区", "分组", "使用人", "部门", "机型", "vCPU", "内存GiB", "显存GiB", "公网IP", "私网IP", "权限模板", "合规", "健康", "告警", "当前连接", "运行时长", "备注"];
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = rows.map(i => [i.name, i.instance_id, (STATE[i.state] || [i.state])[0], i.region, i.az, i.group, i.assignee, i.department, i.instance_type, i.cpu,
+    i.memory_mib ? (i.memory_mib / 1024).toFixed(0) : "", i.gpu_memory_mib ? (i.gpu_memory_mib / 1024).toFixed(1) : "", i.public_ip, i.private_ip,
+    i.template ? i.template.name : (i.perm_mode === "custom" ? "自定义" : "未配置"), COMP[i.compliance][0], HEALTH[i.health][0],
+    [...i.alerts.map(a => a.message), ...i.compliance_reasons].join("；"), (i.inspection || {}).connections ?? "", uptimeOf(i), i.note].map(esc).join(","));
+  const blob = new Blob(["\ufeff" + [head.map(esc).join(","), ...lines].join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `DCV服务器清单_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+}
+
+function ApplyTemplateDialog({ servers, templates, features, onClose, onDone }) {
+  const [tid, setTid] = useState(templates[0] ? templates[0].id : ""); const [busy, setBusy] = useState(false);
+  const t = templates.find(x => x.id === Number(tid));
+  const stopped = servers.filter(s => s.state !== "running"); const offline = servers.filter(s => s.state === "running" && s.ssm !== "Online");
+  const connected = servers.filter(s => (s.inspection || {}).connections > 0);
+  const go = async () => {
+    setBusy(true);
+    try { const r = await post("/api/jobs/apply-template", { instance_ids: servers.map(s => s.instance_id), template_id: Number(tid) }); ok(`已创建任务 #${r.job_id}：应用「${t.name}」到 ${servers.length} 台`); onDone(); }
+    catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={`应用权限模板到 ${servers.length} 台服务器`} onClose={onClose} width="max-w-3xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="indigo" onClick={go} disabled={!t || busy}>{busy ? "提交中…" : "确认应用"}</Btn></>}>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-4">{templates.map(x =>
+        <button key={x.id} onClick={() => setTid(x.id)} className={`text-left rounded-lg border p-2.5 ${Number(tid) === x.id ? "border-indigo-500 bg-indigo-500/10" : "border-slate-700 hover:border-slate-500"}`}>
+          <div className="flex items-center gap-1.5 text-sm font-medium">{x.name}<LevelTag level={x.level} /></div>
+          <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">{x.description}</div>
+        </button>)}</div>
+      {t && <><div className="text-xs text-slate-400 mb-2">「{t.name}」包含的规则（v{t.version}）</div><PermEditor features={features} spec={t.spec} readOnly /></>}
+      <div className="mt-4 space-y-1 text-xs">
+        {stopped.length > 0 && <div className="text-amber-300">· {stopped.length} 台未运行，将跳过（开机后可重新应用）：{stopped.map(s => s.name).join("、")}</div>}
+        {offline.length > 0 && <div className="text-amber-300">· {offline.length} 台 SSM 离线，将无法下发：{offline.map(s => s.name).join("、")}</div>}
+        {connected.length > 0 && <div className="text-rose-300">· {connected.length} 台有用户正在连接，应用时会重建会话，用户需重新连接：{connected.map(s => s.name).join("、")}</div>}
+        <div className="text-slate-500">· 平台会在每台主机上核对权限文件与会话属主，核对通过才算成功，结果可在「任务中心」查看。</div>
+      </div>
+    </Modal>
+  );
+}
+
+function TagsDialog({ servers, summary, onClose, onDone }) {
+  const one = servers.length === 1 ? servers[0] : null;
+  const [f, setF] = useState({ group: one ? one.group : "", assignee: one ? one.assignee : "", department: one ? one.department : "", note: one ? one.note : "" });
+  const [touched, setTouched] = useState({}); const [busy, setBusy] = useState(false);
+  const set = (k, v) => { setF({ ...f, [k]: v }); setTouched({ ...touched, [k]: true }); };
+  const go = async () => {
+    const body = { instance_ids: servers.map(s => s.instance_id) }; Object.keys(touched).forEach(k => body[k] = f[k]);
+    if (Object.keys(touched).length === 0) { onClose(); return; }
+    setBusy(true); try { await post("/api/instances/tags", body); ok(`已更新 ${servers.length} 台服务器`); onDone(); } catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={`设置分组与使用人（${servers.length} 台）`} onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy}>保存</Btn></>}>
+      {!one && <div className="text-xs text-slate-400 mb-3">只修改你编辑过的字段，其余字段保持各服务器原值。清空并保存可删除该字段。</div>}
+      <datalist id="dl-groups">{summary && summary.groups.map(g => <option key={g} value={g} />)}</datalist>
+      <datalist id="dl-depts">{summary && summary.departments.map(g => <option key={g} value={g} />)}</datalist>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="分组"><Input list="dl-groups" value={f.group} onChange={e => set("group", e.target.value)} placeholder="如：设计中心" className="w-full" /></Field>
+        <Field label="部门"><Input list="dl-depts" value={f.department} onChange={e => set("department", e.target.value)} className="w-full" /></Field>
+        <Field label="使用人"><Input value={f.assignee} onChange={e => set("assignee", e.target.value)} placeholder={one ? "" : "批量设置时通常留空"} className="w-full" /></Field>
+        <Field label="备注"><Input value={f.note} onChange={e => set("note", e.target.value)} className="w-full" /></Field>
+      </div>
+      <div className="text-[11px] text-slate-500 mt-3">这些信息保存为 EC2 标签（dcv:group 等），也可用于 AWS 成本分摊报表。</div>
+    </Modal>
+  );
+}
+// ============================================================
+// 服务器详情侧栏
+// ============================================================
+function ServerDrawer({ inst, features, templates, reload, onClose, summary }) {
+  const [tab, setTab] = useState("overview");
+  if (!inst) return null;
+  const tabs = [["overview", "概览"], ["perm", "DCV 权限"], ["history", "运行历史"], ["ops", "运维操作"]];
+  return (
+    <Drawer title={<span className="flex items-center gap-2">{inst.name || inst.instance_id}<StateDot state={inst.state} /></span>}
+      sub={`${inst.instance_id} · ${inst.instance_type} · ${inst.az}`} onClose={onClose}>
+      <div className="flex gap-1 px-5 border-b border-slate-700 sticky top-0 bg-slate-900 z-10">
+        {tabs.map(([k, z]) => <button key={k} onClick={() => setTab(k)} className={`px-3 py-2.5 text-sm -mb-px border-b-2 ${tab === k ? "border-sky-500 text-white" : "border-transparent text-slate-400 hover:text-slate-200"}`}>{z}</button>)}
+      </div>
+      <div className="p-5">
+        {tab === "overview" && <Overview inst={inst} reload={reload} summary={summary} />}
+        {tab === "perm" && <PermTab key={inst.instance_id} inst={inst} features={features} templates={templates} reload={reload} />}
+        {tab === "history" && <HistoryTab key={inst.instance_id} inst={inst} />}
+        {tab === "ops" && <OpsTab inst={inst} reload={reload} />}
+      </div>
+    </Drawer>
+  );
+}
+
+function KV({ k, v, mono }) { return <div className="flex justify-between gap-3 py-1 border-b border-slate-800/80 text-sm"><span className="text-slate-400 shrink-0">{k}</span><span className={`text-right truncate ${mono ? "font-mono text-xs" : ""}`}>{v ?? "—"}</span></div>; }
+
+function Overview({ inst, reload, summary }) {
+  const x = inst.inspection; const live = x && !x.stale && !x.error;
+  const [tags, setTags] = useState(false);
+  const inspectNow = async () => { try { const r = await post("/api/jobs/inspect", { instance_ids: [inst.instance_id] }); ok(`巡检任务 #${r.job_id} 已开始，约 10 秒后刷新`); setTimeout(reload, 9000); } catch (e) { fail(e.message); } };
+  return (
+    <div className="space-y-5">
+      {inst.start_failed && <CapacityAdvice inst={inst} reload={reload} />}
+      {inst.fallback_from && <div className="text-sm rounded-lg px-3 py-2 border bg-sky-500/10 border-sky-500/30 text-sky-200">
+        因 {inst.fallback_from} 容量不足，本次临时以 {inst.instance_type} 开机（规格与费用不同：{hourly(priceOf(inst.region, inst.instance_type))}，原机型 {hourly(priceOf(inst.region, inst.fallback_from))}）。关机后自动改回 {inst.fallback_from}。</div>}
+      {(inst.alerts.length > 0 || inst.compliance_reasons.length > 0) && <div className="space-y-1.5">
+        {inst.alerts.map((a, n) => <div key={n} className={`text-sm rounded-lg px-3 py-2 border ${a.level === "critical" ? "bg-rose-500/10 border-rose-500/40 text-rose-200" : "bg-amber-500/10 border-amber-500/30 text-amber-200"}`}>{a.message}</div>)}
+        {inst.compliance_reasons.map((r, n) => <div key={"c" + n} className="text-sm rounded-lg px-3 py-2 border bg-amber-500/5 border-amber-500/20 text-amber-200">权限：{r}（在「DCV 权限」中重新下发即可修复）</div>)}
+      </div>}
+      <div className="grid grid-cols-2 gap-5">
+        <div>
+          <div className="flex items-center justify-between mb-1"><div className="text-xs font-medium text-slate-400">管理信息</div>{can("operator") && <button className="text-xs text-sky-400 hover:underline" onClick={() => setTags(true)}>编辑</button>}</div>
+          <KV k="分组" v={inst.group || "—"} /><KV k="使用人" v={inst.assignee || "—"} /><KV k="部门" v={inst.department || "—"} /><KV k="备注" v={inst.note || "—"} />
+          <KV k="权限配置" v={inst.template ? `${inst.template.name}（v${inst.template.version}）` : inst.perm_mode === "custom" ? "自定义" : "未配置"} />
+          <KV k="合规" v={<Pill map={COMP} k={inst.compliance} />} /><KV k="健康" v={<Pill map={HEALTH} k={inst.health} />} />
+        </div>
+        <div>
+          <div className="text-xs font-medium text-slate-400 mb-1">规格与网络</div>
+          <KV k="机型" v={inst.instance_type + (inst.fallback_from ? `（临时，原 ${inst.fallback_from}）` : "")} />
+          <KV k="单价" v={<PriceTag region={inst.region} type={inst.instance_type} base={inst.fallback_from || null} />} />
+          <KV k="备选机型" v={inst.fallback_types.length ? inst.fallback_types.join(" → ") + (inst.fallback_custom ? "" : "（默认）") : "不自动换机型"} />
+          <KV k="区域 / 可用区" v={`${regionShort(inst.region)} / ${inst.az}`} /><KV k="CPU / 内存" v={`${inst.cpu} vCPU / ${gib(inst.memory_mib)}`} /><KV k="GPU / 显存" v={`${inst.gpu || "—"} / ${gib(inst.gpu_memory_mib)}`} />
+          <KV k="公网 IP" v={inst.public_ip} mono /><KV k="私网 IP" v={inst.private_ip} mono /><KV k="运行时长" v={uptimeOf(inst)} />
+          <KV k="SSM 代理" v={inst.state === "running" ? (inst.ssm === "Online" ? "在线" : (inst.ssm || "离线")) : "—"} />
+        </div>
+      </div>
+      <div>
+        <div className="flex items-center justify-between mb-2"><div className="text-xs font-medium text-slate-400">主机实时状态 {x && <span className="text-slate-500 font-normal">· 巡检于 {fmtRel(x.checked_at)}{x.stale ? "（已过期）" : ""}</span>}</div>
+          {can("operator") && inst.state === "running" && <Btn small color="ghost" onClick={inspectNow}>立即巡检</Btn>}</div>
+        {!live ? <div className="text-sm text-slate-500 bg-slate-800/40 rounded-lg p-4 text-center">{inst.state !== "running" ? "服务器未运行" : x && x.error ? "巡检失败：" + x.error : "暂无巡检数据，平台每 10 分钟自动巡检一次"}</div> :
+          <div className="grid grid-cols-2 gap-x-5">
+            <div><KV k="CPU 使用率" v={<Bar value={x.cpu} />} /><KV k="内存" v={<span>{((x.mem_total_mb - x.mem_free_mb) / 1024).toFixed(1)} / {(x.mem_total_mb / 1024).toFixed(1)} GiB</span>} />
+              <KV k="GPU 使用率" v={x.gpu_util != null ? x.gpu_util + "%" : "—"} /><KV k="显存" v={x.gpu_mem_total ? `${x.gpu_mem_used} / ${x.gpu_mem_total} MiB` : "—"} />
+              <KV k="系统盘" v={`剩余 ${x.disk_free_gb} / ${x.disk_total_gb} GB`} /></div>
+            <div><KV k="DCV 服务" v={x.dcv_service === "Running" ? "运行中" : x.dcv_service} /><KV k="DCV 版本" v={x.dcv_version} /><KV k="会话属主" v={x.session_owner} />
+              <KV k="当前连接" v={x.connections} /><KV k="最后断开" v={x.last_disconnect ? fmtT(x.last_disconnect) : "—"} /><KV k="授权" v={x.license === "licensed" ? "正常" : x.license} /></div>
+          </div>}
+      </div>
+      {inst.shares && inst.shares.length > 0 && <div>
+        <div className="text-xs font-medium text-slate-400 mb-1">共享盘</div>
+        {inst.shares.map(r => <div key={r.id} className="flex items-center justify-between py-1.5 border-b border-slate-800/80 text-sm">
+          <span><span className="font-mono mr-2">{r.drive}:</span>{r.name}<span className="text-[11px] text-slate-500 ml-2">{r.mode === "rw" ? "读写" : "只读"}</span></span>
+          <span className="text-right"><SharePill st={r.status} />{r.pending > 0 && <span className="text-[11px] text-amber-300 ml-2">{r.pending} 个文件待上传</span>}
+            {r.last_error && r.status !== "ok" && <div className="text-[11px] text-rose-300 max-w-xs truncate" title={r.last_error}>{r.last_error}</div>}</span>
+        </div>)}
+      </div>}
+      {inst.dcv_url && inst.state === "running" && <div className="bg-slate-800/40 border border-slate-700 rounded-lg p-3 text-sm flex items-center justify-between">
+        <span>DCV 连接地址 <span className="font-mono text-xs text-slate-300 ml-2">{inst.dcv_url.replace("https://", "").replace(/\/$/, "")}</span></span>
+        <div className="flex gap-2"><Btn small color="ghost" onClick={() => { navigator.clipboard.writeText(inst.dcv_url.replace("https://", "").replace(/\/$/, "")); ok("已复制"); }}>复制</Btn><a href={inst.dcv_url} target="_blank"><Btn small color="blue">浏览器打开</Btn></a></div>
+      </div>}
+      {tags && <TagsDialog servers={[inst]} summary={summary} onClose={() => setTags(false)} onDone={() => { setTags(false); reload(); }} />}
+    </div>
+  );
+}
+
+function PermTab({ inst, features, templates, reload }) {
+  const iid = inst.instance_id;
+  const [spec, setSpec] = useState(null); const [saved, setSaved] = useState(null); const [owner, setOwner] = useState(""); const [busy, setBusy] = useState(false); const [result, setResult] = useState(null);
+  // 只在切换服务器时加载一次，列表定时刷新不会覆盖正在编辑的内容
+  useEffect(() => { api(`/api/instances/${iid}/dcv/permissions`).then(d => { setSpec(d.spec); setSaved(d.spec); setOwner(d.owner || ""); }).catch(e => fail(e.message)); }, [iid]);
+  if (!spec) return <div className="text-slate-500 text-center py-10">加载中…</div>;
+  const dirty = Object.keys(spec).some(k => spec[k] !== saved[k]);
+  const matchTpl = templates.find(t => features.groups.every(g => g.features.every(f => (t.spec[f.key] || "allow") === (spec[f.key] || "allow"))));
+  const disabled = !can("operator") || inst.state !== "running" || inst.busy;
+  const labelOf = (k) => { for (const g of features.groups) for (const f of g.features) if (f.key === k) return f.label; return k; };
+  const save = async () => {
+    setBusy(true); setResult(null);
+    try {
+      if (matchTpl) { const r = await post("/api/jobs/apply-template", { instance_ids: [iid], template_id: matchTpl.id, owner: owner || null }); ok(`与模板「${matchTpl.name}」一致，已按模板应用（任务 #${r.job_id}）`); setSaved(spec); setTimeout(reload, 20000); }
+      else { const d = await post(`/api/instances/${iid}/dcv/permissions`, { spec, owner: owner || null }); setSaved(spec); setResult(d); d.verified ? ok("已在主机上生效并核对通过") : fail("已下发，但主机核对未通过"); reload(); }
+    } catch (e) { fail(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <span className="text-sm text-slate-400">从模板载入：</span>
+        {templates.map(t => <button key={t.id} onClick={() => setSpec({ ...t.spec })} className={`text-xs px-2 py-1 rounded border ${matchTpl && matchTpl.id === t.id ? "border-indigo-500 bg-indigo-500/15" : "border-slate-700 hover:border-slate-500"}`}>{t.name}</button>)}
+      </div>
+      <PermEditor features={features} spec={spec} onChange={setSpec} readOnly={!can("operator")} />
+      <div className="flex items-center gap-3 mt-4">
+        <Field label="会话属主（Windows 用户）"><Input value={owner} onChange={e => setOwner(e.target.value)} placeholder="dcvuser" className="w-40" disabled={!can("operator")} /></Field>
+        <div className="flex-1 text-xs text-slate-400 pt-4">{matchTpl ? <>当前配置与模板「<span className="text-indigo-300">{matchTpl.name}</span>」一致，保存后该服务器将绑定此模板。</> : "当前为自定义配置，不绑定任何模板。"}</div>
+      </div>
+      <div className="flex items-center gap-3 mt-4 pt-4 border-t border-slate-800">
+        <Btn color="indigo" onClick={save} disabled={disabled || busy}>{busy ? "下发中…（约 15 秒）" : "保存并下发到主机"}</Btn>
+        {dirty && !busy && <span className="text-xs text-amber-300">有未下发的修改</span>}
+        {inst.state !== "running" && <span className="text-xs text-slate-500">服务器未运行，无法下发</span>}
+        {inst.busy && <span className="text-xs text-slate-500">有任务正在执行</span>}
+      </div>
+      {result && <div className={`mt-3 text-sm rounded-lg px-3 py-2 border ${result.verified ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-200" : "bg-rose-500/10 border-rose-500/40 text-rose-200"}`}>
+        {result.verified ? `已在主机上生效（已核对权限文件与会话，属主 ${result.owner}）。受限功能：${result.restricted.length ? result.restricted.map(labelOf).join("、") : "无"}。已连接的用户需断开重连后生效。`
+          : `主机核对未通过：${!result.file_ok ? "权限文件内容不一致；" : ""}${!result.session_ok ? "会话未按属主重建；" : ""}请重试或在「运维操作」中查看会话状态。`}
+      </div>}
+    </div>
+  );
+}
+
+const TL_STYLE = { state: "bg-sky-500/15 text-sky-300", op: "bg-violet-500/15 text-violet-300", platform: "bg-emerald-500/15 text-emerald-300" };
+const TL_ZH = { state: "状态", op: "操作", platform: "平台" };
+function HistoryTab({ inst }) {
+  const [days, setDays] = useState(30); const [data, setData] = useState(null); const [err, setErr] = useState("");
+  useEffect(() => { setData(null); setErr(""); api(`/api/instances/${inst.instance_id}/history?days=${days}`).then(setData).catch(e => setErr(e.message)); }, [inst.instance_id, days]);
+  return (
+    <div>
+      <div className="flex gap-2 mb-4">{[7, 30, 90].map(d => <button key={d} onClick={() => setDays(d)} className={`text-xs px-3 py-1 rounded-lg ${days === d ? "bg-sky-600" : "bg-slate-800 hover:bg-slate-700"}`}>近 {d} 天</button>)}</div>
+      {err && <div className="text-rose-400 text-sm">{err}</div>}
+      {!data && !err ? <div className="text-slate-500 text-center py-10">查询中…（CloudTrail 约需数秒）</div> : data && <>
+        <div className="grid grid-cols-3 gap-3 mb-4">
+          <div className="bg-slate-800/50 rounded-xl p-3"><div className="text-xs text-slate-400">累计运行</div><div className="text-lg font-semibold text-sky-300 mt-1">{fmtDur(data.total_seconds)}</div></div>
+          <div className="bg-slate-800/50 rounded-xl p-3"><div className="text-xs text-slate-400">开机次数</div><div className="text-lg font-semibold mt-1">{data.session_count}</div></div>
+          <div className="bg-slate-800/50 rounded-xl p-3"><div className="text-xs text-slate-400">日均运行</div><div className="text-lg font-semibold mt-1">{fmtDur(data.total_seconds / data.days)}</div></div>
+        </div>
+        <div className="text-xs font-medium text-slate-400 mb-2">运行时段</div>
+        <table className="w-full text-sm mb-5"><tbody>{data.sessions.map((s, n) => <tr key={n} className="border-b border-slate-800">
+          <td className="py-1.5">{fmtT(s.start)}</td><td>{s.ongoing ? <span className="text-emerald-300">运行中</span> : fmtT(s.end)}</td><td className="text-right font-mono text-xs">{fmtDur(s.seconds)}</td></tr>)}
+          {data.sessions.length === 0 && <tr><td className="text-slate-500 py-3 text-center">该时间范围内无运行记录</td></tr>}</tbody></table>
+        <div className="text-xs font-medium text-slate-400 mb-2">事件明细</div>
+        <div className="space-y-1">{data.timeline.map((e, n) => <div key={n} className="flex items-center gap-3 text-sm py-1 border-b border-slate-800/70">
+          <span className="text-xs text-slate-500 w-36 shrink-0">{fmtT(e.time)}</span><span className={`text-[11px] px-1.5 py-0.5 rounded shrink-0 ${TL_STYLE[e.type]}`}>{TL_ZH[e.type]}</span>
+          <span className="shrink-0">{e.title}</span><span className="text-xs text-slate-500 truncate">{e.source}{e.detail ? " · " + e.detail : ""}{e.error ? " · 失败：" + e.error : ""}</span></div>)}</div>
+      </>}
+    </div>
+  );
+}
+
+function genPassword(len = 16) {
+  const sets = ["ABCDEFGHJKLMNPQRSTUVWXYZ", "abcdefghijkmnopqrstwxyz", "23456789", "#@%!&*+=?"]; const all = sets.join("");
+  const r = new Uint32Array(len * 2); crypto.getRandomValues(r); const c = sets.map((s, i) => s[r[i] % s.length]);
+  for (let i = 4; c.length < len; i++) c.push(all[r[i] % all.length]);
+  for (let i = c.length - 1; i > 0; i--) { const j = r[len + i] % (i + 1); [c[i], c[j]] = [c[j], c[i]]; }
+  const p = c.join(""); return /dcv|user|remote|access/i.test(p) ? genPassword(len) : p;
+}
+
+function OpsTab({ inst, reload }) {
+  const [dlg, setDlg] = useState(null); const [status, setStatus] = useState(null);
+  const running = inst.state === "running"; const op = can("operator");
+  const power = async (action) => {
+    const zh = { start: "开机", stop: "关机", reboot: "重启" }[action]; const conn = (inst.inspection || {}).connections;
+    if (action !== "start" && !await Confirm.ask({ title: zh, message: `确认${zh} ${inst.name}？` + (conn ? `\n\n当前有 ${conn} 个用户正在连接，${zh}会中断其工作。` : ""), danger: true, okText: `确认${zh}` })) return;
+    try { await post(`/api/instances/${inst.instance_id}/power`, { action }); ok(`${zh}指令已提交`); setTimeout(reload, 1500); } catch (e) { fail(e.message); }
+  };
+  const rename = async () => { const n = prompt("新的服务器名称", inst.name); if (!n || n === inst.name) return; try { await post(`/api/instances/${inst.instance_id}/rename`, { name: n }); ok("已重命名"); reload(); } catch (e) { fail(e.message); } };
+  const loadStatus = async () => { setStatus({ loading: true }); try { setStatus(await api(`/api/instances/${inst.instance_id}/dcv/status`)); } catch (e) { setStatus({ error: e.message }); } };
+  const Item = ({ title, desc, children }) => <div className="flex items-center justify-between gap-4 py-3 border-b border-slate-800"><div><div className="text-sm font-medium">{title}</div><div className="text-xs text-slate-500 mt-0.5">{desc}</div></div><div className="flex gap-2 shrink-0">{children}</div></div>;
+  return (
+    <div>
+      {!op && <div className="text-sm text-slate-400 bg-slate-800/40 rounded-lg p-3 mb-3">你的角色为只读，无法执行运维操作。</div>}
+      <Item title="电源" desc="开机、关机、重启。关机/重启会中断正在连接的用户。">
+        <Btn small color="green" disabled={!op || inst.state !== "stopped" || inst.busy} onClick={() => setDlg("start")}>开机</Btn>
+        <Btn small color="red" disabled={!op || !running || inst.busy} onClick={() => power("stop")}>关机</Btn>
+        <Btn small color="amber" disabled={!op || !running || inst.busy} onClick={() => power("reboot")}>重启</Btn>
+      </Item>
+      <Item title="机型" desc={`当前 ${inst.instance_type}${inst.original_type ? `（原为 ${inst.original_type}，因容量不足临时更改）` : ""}。关机状态下可更改，实例 ID、磁盘、配置不变。`}>
+        {inst.original_type && inst.state === "stopped" && <Btn small color="ghost" disabled={!op} onClick={() => setDlg({ type: inst.original_type })}>改回 {inst.original_type}</Btn>}
+        <Btn small disabled={!op || inst.state !== "stopped" || inst.busy} onClick={() => setDlg("type")}>更改机型</Btn>
+      </Item>
+      <Item title="备选机型" desc={`开机（含定时开机）容量不足时依次改用：${inst.fallback_types.length ? inst.fallback_types.join(" → ") : "不自动换机型"}${inst.fallback_custom ? "" : "（默认顺序）"}。临时机型在关机后自动改回。`}>
+        <Btn small disabled={!op} onClick={() => setDlg("fallback")}>设置</Btn>
+      </Item>
+      <Item title="迁移可用区" desc={`当前在 ${inst.az}。该可用区长期缺货时，整机（含磁盘、配置、用户文件）迁移到有容量的可用区，约 10–30 分钟；实例 ID 和 IP 会变化。需先关机。`}>
+        <Btn small disabled={!can("admin") || inst.state !== "stopped" || inst.busy} onClick={() => setDlg("migrate")}>迁移</Btn>
+      </Item>
+      <Item title="删除服务器" desc="终止实例，系统盘随之删除，不可恢复。可选先制作备份快照；平台中的模板绑定、共享盘授权、定时任务会同步清理。">
+        <Btn small color="red" disabled={!can("admin") || inst.busy} onClick={() => setDlg("terminate")}>删除</Btn>
+      </Item>
+      <Item title="重置 DCV 登录密码" desc="修改主机上 Windows 用户（默认会话属主）的密码，密码经加密参数中转，不出现在命令记录中。"><Btn small disabled={!op || !running} onClick={() => setDlg("pw")}>重置密码</Btn></Item>
+      <Item title="创建快照" desc="把当前系统盘做成镜像，可用于批量创建相同配置的服务器。运行中创建不重启，但建议关机后创建以保证一致性。"><Btn small disabled={!op} onClick={() => setDlg("snap")}>创建快照</Btn></Item>
+      <Item title="重命名" desc="修改 EC2 实例的 Name 标签。"><Btn small disabled={!op} onClick={rename}>重命名</Btn></Item>
+      <Item title="DCV 会话状态" desc="实时读取主机上 DCV 服务与会话列表，用于排查连接问题。"><Btn small disabled={!running} onClick={loadStatus}>查看</Btn></Item>
+      {status && <pre className="mt-3 bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs whitespace-pre-wrap text-slate-300">{status.loading ? "读取中…" : status.error ? "错误：" + status.error : status.online === false ? status.message : `服务：${status.service}\n${status.sessions}`}</pre>}
+      {dlg === "pw" && <DcvPasswordDialog inst={inst} onClose={() => setDlg(null)} />}
+      {(dlg === "type" || (dlg && dlg.type)) && <ChangeTypeDialog inst={inst} preset={dlg.type} onClose={() => setDlg(null)} onDone={() => { setDlg(null); reload(); }} />}
+      {dlg === "snap" && <SnapshotDialog inst={inst} onClose={() => setDlg(null)} />}
+      {dlg === "start" && <StartDialog servers={[inst]} onClose={() => setDlg(null)} onDone={() => { setDlg(null); setTimeout(reload, 1500); }} />}
+      {dlg === "fallback" && <FallbackDialog servers={[inst]} onClose={() => setDlg(null)} onDone={() => { setDlg(null); reload(); }} />}
+      {dlg === "terminate" && <TerminateDialog servers={[inst]} onClose={() => setDlg(null)} onDone={() => { setDlg(null); setTimeout(reload, 2000); }} />}
+      {dlg === "migrate" && <MigrateDialog servers={[inst]} onClose={() => setDlg(null)} onDone={() => { setDlg(null); setTimeout(reload, 1500); }} />}
+    </div>
+  );
+}
+
+function DcvPasswordDialog({ inst, onClose }) {
+  const [user, setUser] = useState(""); const [pw, setPw] = useState(""); const [pw2, setPw2] = useState(""); const [show, setShow] = useState(false); const [busy, setBusy] = useState(false); const [done, setDone] = useState(null);
+  const gen = () => { const p = genPassword(); setPw(p); setPw2(p); setShow(true); };
+  const go = async () => { if (pw !== pw2) { fail("两次输入的密码不一致"); return; } setBusy(true); try { const d = await post(`/api/instances/${inst.instance_id}/dcv/password`, { password: pw, username: user || null }); setDone({ u: d.username, p: pw }); } catch (e) { fail(e.message); } finally { setBusy(false); } };
+  return (
+    <Modal title={`重置 DCV 登录密码 · ${inst.name}`} onClose={onClose} footer={done ? <Btn color="blue" onClick={onClose}>完成</Btn> : <><Btn onClick={onClose}>取消</Btn><Btn color="amber" onClick={go} disabled={busy || !pw}>{busy ? "重置中…（约 15 秒）" : "确认重置"}</Btn></>}>
+      {done ? <div className="space-y-3"><div className="text-emerald-300 text-sm">已重置并在主机上验证通过。</div>
+        <div className="bg-slate-950 border border-slate-700 rounded-lg p-3 font-mono text-sm">用户名：{done.u}<br />新密码：{done.p}</div>
+        <div className="text-xs text-amber-300">请立即记录并安全地交给使用者，关闭后不再显示。</div><Btn small onClick={() => { navigator.clipboard.writeText(done.p); ok("已复制"); }}>复制密码</Btn></div> :
+        <div className="space-y-3">
+          <Field label="Windows 用户名" hint="留空则使用当前会话属主"><Input value={user} onChange={e => setUser(e.target.value)} placeholder="dcvuser" className="w-full" /></Field>
+          <Field label="新密码"><div className="flex gap-2"><Input type={show ? "text" : "password"} value={pw} onChange={e => setPw(e.target.value)} className="flex-1 font-mono" /><Btn small onClick={() => setShow(!show)}>{show ? "隐藏" : "显示"}</Btn><Btn small color="indigo" onClick={gen}>随机生成</Btn></div></Field>
+          <Field label="确认新密码" hint="至少 12 位，含大写、小写、数字、符号中至少三类；不能包含 dcv、user、remote、access 等字样"><Input type={show ? "text" : "password"} value={pw2} onChange={e => setPw2(e.target.value)} className="w-full font-mono" /></Field>
+        </div>}
+    </Modal>
+  );
+}
+
+function SnapshotDialog({ inst, onClose }) {
+  const [name, setName] = useState(`${inst.name || "dcv"}-${new Date().toISOString().slice(0, 10)}`); const [desc, setDesc] = useState(""); const [busy, setBusy] = useState(false);
+  const go = async () => { setBusy(true); try { const d = await post(`/api/instances/${inst.instance_id}/snapshot`, { name, description: desc, no_reboot: true }); ok(`快照 ${d.image_id} 创建中，约需 10 分钟，可在「快照与镜像」查看`); onClose(); } catch (e) { fail(e.message); setBusy(false); } };
+  return (
+    <Modal title={`创建快照 · ${inst.name}`} onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy || !name}>创建</Btn></>}>
+      <div className="space-y-3"><Field label="快照名称"><Input value={name} onChange={e => setName(e.target.value)} className="w-full" /></Field>
+        <Field label="说明（可选）"><Input value={desc} onChange={e => setDesc(e.target.value)} placeholder="如：已安装 Maya 2026 与公司字体" className="w-full" /></Field>
+        {inst.state === "running" && <div className="text-xs text-amber-300">服务器正在运行，快照不会重启主机，但正在写入的数据可能不完整。制作标准镜像建议先关机。</div>}</div>
+    </Modal>
+  );
+}
+// ============================================================
+// 定时任务（EventBridge Scheduler）
+// ============================================================
+let CFG = null;
+const WEEK = [["MON", "一"], ["TUE", "二"], ["WED", "三"], ["THU", "四"], ["FRI", "五"], ["SAT", "六"], ["SUN", "日"]];
+const WEEK_ZH = Object.fromEntries(WEEK);
+const ACT = { start: ["开机", "text-emerald-300"], stop: ["关机", "text-rose-300"], reboot: ["重启", "text-amber-300"] };
+function parseCron(c) {
+  const p = (c || "").trim().split(/\s+/); if (p.length !== 6) return { freq: "custom" };
+  const [m, h, dom, , dow] = p; if (!/^\d+$/.test(m) || !/^\d+$/.test(h)) return { freq: "custom" };
+  const time = `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
+  if (dom === "*" && dow === "?") return { freq: "daily", time };
+  if (dom === "?" && dow === "MON-FRI") return { freq: "weekdays", time };
+  if (dom === "?" && /^[A-Z]{3}(,[A-Z]{3})*$/.test(dow)) return { freq: "weekly", time, days: dow.split(",") };
+  return { freq: "custom" };
+}
+function buildCron(freq, time, days) {
+  const [h, m] = (time || "09:00").split(":").map(Number);
+  if (freq === "daily") return `${m} ${h} * * ? *`;
+  if (freq === "weekdays") return `${m} ${h} ? * MON-FRI *`;
+  return `${m} ${h} ? * ${(days && days.length ? days : ["MON"]).join(",")} *`;
+}
+function cronText(c) {
+  const p = parseCron(c);
+  if (p.freq === "daily") return `每天 ${p.time}`;
+  if (p.freq === "weekdays") return `工作日 ${p.time}`;
+  if (p.freq === "weekly") return `每周${p.days.map(d => WEEK_ZH[d]).join("、")} ${p.time}`;
+  return `cron(${c})`;
+}
+
+function ScheduleDialog({ servers, preselect, existing, onClose, onDone }) {
+  const init = existing ? parseCron(existing.cron) : { freq: "weekdays", time: "08:30" };
+  const [action, setAction] = useState(existing ? existing.action : "workhours");
+  const [freq, setFreq] = useState(init.freq); const [time, setTime] = useState(init.time || "09:00"); const [days, setDays] = useState(init.days || ["MON"]);
+  const [custom, setCustom] = useState(existing ? existing.cron : "0 9 ? * MON-FRI *");
+  const [onT, setOnT] = useState("08:30"); const [offT, setOffT] = useState("19:00");
+  const [note, setNote] = useState(existing ? existing.note : ""); const [sel, setSel] = useState(existing ? existing.instance_ids : (preselect || []));
+  const [busy, setBusy] = useState(false);
+  const tz = (CFG && CFG.scheduler_tz) || "Asia/Shanghai";
+  const cron = freq === "custom" ? custom : buildCron(freq, time, days);
+  const freqPart = freq === "custom" ? `cron(${custom})` : cronText(buildCron(freq, "00:00", days)).replace(" 00:00", "");
+  const go = async () => {
+    if (!sel.length) { fail("请至少选择一台服务器"); return; }
+    setBusy(true);
+    try {
+      if (existing) { await put(`/api/schedules/${existing.name}`, { action, cron, note, instance_ids: sel }); ok("定时任务已更新"); }
+      else if (action === "workhours") {
+        if (freq === "custom") { fail("上下班计划请选择每天、工作日或每周"); setBusy(false); return; }
+        await post("/api/schedules", { instance_ids: sel, action: "start", cron: buildCron(freq, onT, days), note: (note ? note + " · " : "") + "上班开机" });
+        await post("/api/schedules", { instance_ids: sel, action: "stop", cron: buildCron(freq, offT, days), note: (note ? note + " · " : "") + "下班关机" });
+        ok(`已创建上下班计划（${sel.length} 台）` + (new Set(sel.map(id => (servers.find(x => x.instance_id === id) || {}).region)).size > 1 ? "，已按区域拆分" : ""));
+      } else { const r = await post("/api/schedules", { instance_ids: sel, action, cron, note }); ok(r.message || "定时任务已创建"); }
+      onDone && onDone();
+    } catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={existing ? "编辑定时任务" : "创建定时任务"} onClose={onClose} width="max-w-3xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy}>{busy ? "保存中…" : "保存"}</Btn></>}>
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <Field label="动作"><Select value={action} onChange={e => setAction(e.target.value)} className="w-full">
+          {!existing && <option value="workhours">上下班计划（开机 + 关机）</option>}
+          <option value="start">开机</option><option value="stop">关机</option><option value="reboot">重启</option></Select></Field>
+        <Field label="频率"><Select value={freq} onChange={e => setFreq(e.target.value)} className="w-full">
+          <option value="weekdays">工作日（周一至周五）</option><option value="daily">每天</option><option value="weekly">每周指定日</option>{action !== "workhours" && <option value="custom">自定义 Cron</option>}</Select></Field>
+        {action === "workhours" ? <div className="grid grid-cols-2 gap-2">
+          <Field label="开机时间"><Input type="time" value={onT} onChange={e => setOnT(e.target.value)} className="w-full" /></Field>
+          <Field label="关机时间"><Input type="time" value={offT} onChange={e => setOffT(e.target.value)} className="w-full" /></Field></div>
+          : <Field label="时间"><Input type="time" value={time} onChange={e => setTime(e.target.value)} disabled={freq === "custom"} className="w-full" /></Field>}
+      </div>
+      {freq === "weekly" && <div className="flex gap-1.5 mb-3">{WEEK.map(([k, z]) => <button key={k} onClick={() => setDays(days.includes(k) ? days.filter(d => d !== k) : [...days, k])} className={`w-9 h-8 rounded text-sm ${days.includes(k) ? "bg-sky-600" : "bg-slate-800"}`}>{z}</button>)}</div>}
+      {freq === "custom" && <Field label="AWS Cron 表达式（分 时 日 月 周 年；日与周其一须为 ?）"><Input value={custom} onChange={e => setCustom(e.target.value)} className="w-full font-mono mb-3" /></Field>}
+      <div className="text-xs text-slate-400 bg-slate-800/50 rounded-lg px-3 py-2 mb-3">
+        将执行：{action === "workhours" ? `${freqPart} ${onT} 开机，${offT} 关机` : `${freq === "custom" ? `cron(${custom})` : cronText(cron)} ${ACT[action][0]}`}（时区 {tz}）· 由 AWS EventBridge Scheduler 托管执行，管理平台关闭不影响触发
+      </div>
+      <Field label="目标服务器"><ServerPicker servers={servers} value={sel} onChange={setSel} /></Field>
+      <div className="mt-3"><Field label="备注"><Input value={note} onChange={e => setNote(e.target.value)} placeholder="如：设计中心工作时间" className="w-full" /></Field></div>
+    </Modal>
+  );
+}
+
+function SchedulesPage({ servers }) {
+  const [list, setList] = useState(null); const [dlg, setDlg] = useState(null);
+  const byId = useMemo(() => Object.fromEntries(servers.map(s => [s.instance_id, s])), [servers]);
+  const load = useCallback(() => api("/api/schedules").then(d => setList(d.schedules)).catch(e => fail(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  const toggle = async (s) => { try { await put(`/api/schedules/${s.name}`, { enabled: !s.enabled }); ok(s.enabled ? "已禁用" : "已启用"); load(); } catch (e) { fail(e.message); } };
+  const remove = async (s) => { if (!await Confirm.ask({ title: "删除定时任务", message: `删除「${cronText(s.cron)} ${ACT[s.action][0]}」（${s.instance_ids.length} 台）？`, danger: true, okText: "删除" })) return; try { await del(`/api/schedules/${s.name}`); ok("已删除"); load(); } catch (e) { fail(e.message); } };
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm text-slate-400">由 AWS EventBridge Scheduler 托管执行，与管理平台和 Windows 主机是否在线无关。
+          {multiRegion() ? "定时任务按区域执行，选择多个区域的服务器时自动按区域拆分。" : ""}{CFG && CFG.managed_start ? "开机任务容量不足时，按各服务器的备选机型自动换机型开机，关机后自动改回。" : <span className="text-amber-300">尚未部署托管开机函数，定时开机容量不足时不会自动换机型（见 README）。</span>}</div>
+        {can("admin") && <Btn color="blue" onClick={() => setDlg({})}>创建定时任务</Btn>}
+      </div>
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2">动作</th>{multiRegion() && <th className="text-left px-3">区域</th>}<th className="text-left px-3">时间</th><th className="text-left px-3">目标服务器</th><th className="text-left px-3">备注</th><th className="text-left px-3">状态</th><th className="text-right px-3">操作</th></tr></thead>
+          <tbody>
+            {list && list.map(s => { const gone = s.instance_ids.filter(i => !byId[i]); const names = s.instance_ids.filter(i => byId[i]).map(i => byId[i].name || i);
+              return <tr key={s.name} className="border-b border-slate-800">
+                <td className={`px-3 py-2.5 font-medium ${ACT[s.action] ? ACT[s.action][1] : ""}`}>{ACT[s.action] ? ACT[s.action][0] : s.action}
+                  {s.action === "start" && <div className={`text-[11px] font-normal ${s.managed_start ? "text-slate-500" : "text-amber-300"}`}>{s.managed_start ? "容量不足自动换机型" : "不自动换机型（保存一次即可升级）"}</div>}</td>
+                {multiRegion() && <td className="px-3 whitespace-nowrap text-slate-300">{regionShort(s.region)}</td>}
+                <td className="px-3 whitespace-nowrap">{cronText(s.cron)}<div className="text-[11px] text-slate-500">{s.timezone}</div></td>
+                <td className="px-3 max-w-md"><div className="truncate" title={names.join("、")}>{s.instance_ids.length} 台：{names.slice(0, 4).join("、")}{names.length > 4 ? " 等" : ""}</div>{gone.length > 0 && <div className="text-[11px] text-amber-300">{gone.length} 台已不存在或未纳管</div>}</td>
+                <td className="px-3 text-slate-400">{s.note || "—"}</td>
+                <td className="px-3">{s.enabled ? <span className="text-emerald-300 text-xs">启用</span> : <span className="text-slate-500 text-xs">已禁用</span>}</td>
+                <td className="px-3 text-right whitespace-nowrap space-x-1.5">{can("admin") && <><Btn small color="ghost" onClick={() => setDlg({ existing: s })}>编辑</Btn><Btn small color="ghost" onClick={() => toggle(s)}>{s.enabled ? "禁用" : "启用"}</Btn><Btn small color="ghost" onClick={() => remove(s)}>删除</Btn></>}</td>
+              </tr>; })}
+            {list && list.length === 0 && <tr><td colSpan="7" className="text-center text-slate-500 py-10">暂无定时任务。建议为各分组配置「上下班计划」，非工作时间自动关机可显著节省费用。</td></tr>}
+            {!list && <tr><td colSpan="6" className="text-center text-slate-500 py-10">加载中…</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {dlg && <ScheduleDialog servers={servers} existing={dlg.existing} onClose={() => setDlg(null)} onDone={() => { setDlg(null); load(); }} />}
+    </div>
+  );
+}
+
+// ============================================================
+// 权限模板
+// ============================================================
+function TemplatesPage({ templates, features, servers, reloadTpl, reload }) {
+  const [view, setView] = useState("cards"); const [edit, setEdit] = useState(null); const [apply, setApply] = useState(null);
+  const labelOf = (k) => { for (const g of features.groups) for (const f of g.features) if (f.key === k) return f.label; return k; };
+  const bound = (t) => servers.filter(s => s.template && s.template.id === t.id);
+  const remove = async (t) => {
+    if (!await Confirm.ask({ title: "删除模板", message: `删除模板「${t.name}」？` + (t.instance_count ? `\n\n${t.instance_count} 台服务器正在使用，删除后这些服务器的权限保持不变，但转为「自定义」。` : ""), danger: true, okText: "删除" })) return;
+    try { await del(`/api/templates/${t.id}`); ok("已删除"); reloadTpl(); reload(); } catch (e) { fail(e.message); }
+  };
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex gap-1 bg-slate-900 border border-slate-700 rounded-lg p-0.5">{[["cards", "模板列表"], ["matrix", "规则对比"]].map(([k, z]) => <button key={k} onClick={() => setView(k)} className={`px-3 py-1 text-sm rounded-md ${view === k ? "bg-slate-700" : "text-slate-400"}`}>{z}</button>)}</div>
+        {can("admin") && <Btn color="blue" onClick={() => setEdit({ spec: { ...templates[0].spec }, name: "", description: "", level: "中" })}>新建模板</Btn>}
+      </div>
+      {view === "cards" ? <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-3">{templates.map(t => {
+        const r = Object.keys(t.spec).filter(k => t.spec[k] !== "allow"); const b = bound(t); const od = b.filter(s => s.template.outdated);
+        return <div key={t.id} className="bg-slate-900 border border-slate-700 rounded-xl p-4 flex flex-col">
+          <div className="flex items-center gap-2"><span className="font-semibold">{t.name}</span><LevelTag level={t.level} />{t.builtin && <span className="text-[10px] text-slate-500 border border-slate-700 rounded px-1">内置</span>}<span className="ml-auto text-[11px] text-slate-500">v{t.version}</span></div>
+          <div className="text-xs text-slate-400 mt-1.5 min-h-[32px]">{t.description}</div>
+          <div className="mt-3 text-xs"><span className="text-slate-500">受限 {r.length} 项：</span>{r.length ? r.map(k => <span key={k} className={`inline-block mr-1.5 ${RULE[t.spec[k]][1]}`}>{labelOf(k)}</span>) : <span className="text-emerald-300">无</span>}</div>
+          <div className="mt-3 text-xs text-slate-400">使用中 <span className="text-slate-200">{b.length}</span> 台{od.length > 0 && <span className="text-amber-300">，{od.length} 台待重新应用</span>}</div>
+          <div className="text-[11px] text-slate-600 mt-0.5">最后修改：{t.updated_by} · {fmtT(t.updated_at)}</div>
+          <div className="flex gap-1.5 mt-3 pt-3 border-t border-slate-800">
+            {can("operator") && <Btn small color="indigo" onClick={() => setApply(t)}>应用到服务器</Btn>}
+            {can("admin") && <Btn small color="ghost" onClick={() => setEdit(t)}>编辑</Btn>}
+            {can("admin") && <Btn small color="ghost" onClick={() => setEdit({ ...t, id: null, name: t.name + " 副本", builtin: false })}>复制</Btn>}
+            {can("admin") && !t.builtin && <Btn small color="ghost" onClick={() => remove(t)}>删除</Btn>}
+          </div>
+        </div>; })}</div> :
+        <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-x-auto scrollbar"><table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2 sticky left-0 bg-slate-900">功能</th>{templates.map(t => <th key={t.id} className="px-3 py-2 text-center whitespace-nowrap">{t.name}</th>)}</tr></thead>
+          <tbody>{features.groups.map(g => <React.Fragment key={g.group}>
+            <tr><td colSpan={templates.length + 1} className="px-3 pt-3 pb-1 text-[11px] text-slate-500">{g.group}</td></tr>
+            {g.features.map(f => <tr key={f.key} className="border-b border-slate-800/60"><td className="px-3 py-1.5 sticky left-0 bg-slate-900">{f.label}</td>
+              {templates.map(t => { const r = t.spec[f.key] || "allow"; return <td key={t.id} className={`text-center text-xs ${RULE[r][1]}`}>{r === "allow" ? "✓" : RULE[r][0]}</td>; })}</tr>)}
+          </React.Fragment>)}</tbody></table></div>}
+      {edit && <TemplateEditor tpl={edit} features={features} servers={servers} onClose={() => setEdit(null)} onSaved={(t, reapply) => { setEdit(null); reloadTpl(); reload(); if (reapply) setApply({ ...t, _onlyBound: true }); }} />}
+      {apply && <ApplyToServersDialog template={templates.find(t => t.id === apply.id) || apply} onlyBound={apply._onlyBound} servers={servers} onClose={() => setApply(null)} onDone={() => { setApply(null); setTimeout(reload, 1500); }} />}
+    </div>
+  );
+}
+
+function TemplateEditor({ tpl, features, servers, onClose, onSaved }) {
+  const [name, setName] = useState(tpl.name || ""); const [level, setLevel] = useState(tpl.level || "中"); const [desc, setDesc] = useState(tpl.description || "");
+  const [spec, setSpec] = useState({ ...tpl.spec }); const [busy, setBusy] = useState(false);
+  const boundN = tpl.id ? servers.filter(s => s.template && s.template.id === tpl.id).length : 0;
+  const go = async () => {
+    if (!name.trim()) { fail("请填写模板名称"); return; }
+    setBusy(true);
+    try {
+      const body = { name, level, description: desc, spec };
+      const t = tpl.id ? await put(`/api/templates/${tpl.id}`, body) : await post("/api/templates", body);
+      ok(tpl.id ? `已保存为 v${t.version}` : "模板已创建");
+      const reapply = boundN > 0 && await Confirm.ask({ title: "重新应用", message: `${boundN} 台服务器正在使用此模板。修改后它们的实际权限不会自动变化，是否现在重新应用？`, okText: "选择服务器并应用" });
+      onSaved(t, reapply);
+    } catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={tpl.id ? `编辑模板 · ${tpl.name}` : "新建权限模板"} onClose={onClose} width="max-w-4xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy}>保存</Btn></>}>
+      <div className="grid grid-cols-4 gap-3 mb-4">
+        <div className="col-span-2"><Field label="名称"><Input value={name} onChange={e => setName(e.target.value)} className="w-full" /></Field></div>
+        <Field label="安全等级"><Select value={level} onChange={e => setLevel(e.target.value)} className="w-full">{["低", "中", "高", "最高"].map(l => <option key={l}>{l}</option>)}</Select></Field>
+        <div />
+        <div className="col-span-4"><Field label="适用场景说明"><Input value={desc} onChange={e => setDesc(e.target.value)} className="w-full" /></Field></div>
+      </div>
+      <PermEditor features={features} spec={spec} onChange={setSpec} />
+      {tpl.builtin && <div className="text-xs text-slate-500 mt-3">这是内置模板，可以修改但不能删除。</div>}
+    </Modal>
+  );
+}
+
+function ApplyToServersDialog({ template, servers, onlyBound, onClose, onDone }) {
+  const boundIds = servers.filter(s => s.template && s.template.id === template.id).map(s => s.instance_id);
+  const outdatedIds = servers.filter(s => s.template && s.template.id === template.id && s.template.outdated).map(s => s.instance_id);
+  const [sel, setSel] = useState(onlyBound ? boundIds : []); const [busy, setBusy] = useState(false);
+  const picked = servers.filter(s => sel.includes(s.instance_id));
+  const stopped = picked.filter(s => s.state !== "running").length; const conn = picked.filter(s => (s.inspection || {}).connections > 0);
+  const go = async () => {
+    if (!sel.length) { fail("请至少选择一台服务器"); return; }
+    if (conn.length && !await Confirm.ask({ title: "有用户正在连接", message: `${conn.length} 台服务器有用户正在使用，应用权限会重建 DCV 会话，这些用户需要重新连接。是否继续？`, list: conn.map(s => `${s.name}（${s.assignee || "未知使用人"}）`), okText: "继续应用" })) return;
+    setBusy(true);
+    try { const r = await post("/api/jobs/apply-template", { instance_ids: sel, template_id: template.id }); ok(`已创建任务 #${r.job_id}`); onDone(); } catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={`应用「${template.name}」到服务器`} onClose={onClose} width="max-w-3xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="indigo" onClick={go} disabled={busy || !sel.length}>应用到 {sel.length} 台</Btn></>}>
+      <div className="flex gap-2 mb-3">
+        <Btn small color="ghost" onClick={() => setSel(boundIds)} disabled={!boundIds.length}>选择使用此模板的 {boundIds.length} 台</Btn>
+        <Btn small color="ghost" onClick={() => setSel(outdatedIds)} disabled={!outdatedIds.length}>仅选待重新应用的 {outdatedIds.length} 台</Btn>
+      </div>
+      <ServerPicker servers={servers} value={sel} onChange={setSel} />
+      <div className="text-xs text-slate-500 mt-3 space-y-0.5">
+        {stopped > 0 && <div className="text-amber-300">所选中 {stopped} 台未运行，将跳过。</div>}
+        <div>每台主机下发后都会核对权限文件和会话属主，核对通过才记为成功。</div>
+      </div>
+    </Modal>
+  );
+}
+
+// ============================================================
+// 任务中心
+// ============================================================
+const JOB_ST = { running: ["执行中", "text-sky-300"], success: ["成功", "text-emerald-300"], partial: ["部分失败", "text-amber-300"], failed: ["失败", "text-rose-300"] };
+const ITEM_ST = { pending: ["等待", "text-slate-400"], running: ["执行中", "text-sky-300"], success: ["成功", "text-emerald-300"], failed: ["失败", "text-rose-300"], skipped: ["跳过", "text-slate-400"] };
+
+function JobsPage({ reload, openJob, setOpenJob }) {
+  const [jobs, setJobs] = useState(null);
+  const load = useCallback(() => api("/api/jobs?limit=100").then(d => setJobs(d.jobs)).catch(e => fail(e.message)), []);
+  const anyRunning = jobs && jobs.some(j => j.status === "running");
+  useEffect(() => { load(); const t = setInterval(load, anyRunning ? 2500 : 10000); return () => clearInterval(t); }, [load, anyRunning]);
+  return (
+    <div>
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2">#</th><th className="text-left px-3">任务</th><th className="text-left px-3 w-56">进度</th><th className="text-left px-3">状态</th><th className="text-left px-3">发起人</th><th className="text-left px-3">开始时间</th><th className="text-left px-3">耗时</th></tr></thead>
+          <tbody>
+            {jobs && jobs.map(j => <tr key={j.id} className="border-b border-slate-800 hover:bg-slate-800/50 cursor-pointer" onClick={() => setOpenJob(j.id)}>
+              <td className="px-3 py-2.5 text-slate-500">{j.id}</td><td className="px-3">{j.title}</td>
+              <td className="px-3"><div className="flex items-center gap-2"><div className="flex-1 h-1.5 bg-slate-800 rounded overflow-hidden flex">
+                <div className="bg-emerald-500 h-1.5" style={{ width: ((j.done - j.failed) * 100 / j.total) + "%" }} /><div className="bg-rose-500 h-1.5" style={{ width: (j.failed * 100 / j.total) + "%" }} /></div>
+                <span className="text-xs text-slate-400 w-14 text-right">{j.done}/{j.total}</span></div></td>
+              <td className={`px-3 ${JOB_ST[j.status][1]}`}>{JOB_ST[j.status][0]}{j.failed > 0 && <span className="text-xs text-rose-300 ml-1">（{j.failed} 失败）</span>}</td>
+              <td className="px-3 text-slate-400">{j.operator}</td><td className="px-3 text-slate-400 whitespace-nowrap">{fmtT(j.created_at)}</td>
+              <td className="px-3 text-slate-400">{j.finished_at ? Math.max(1, Math.round(j.finished_at - j.created_at)) + " 秒" : "…"}</td>
+            </tr>)}
+            {jobs && jobs.length === 0 && <tr><td colSpan="7" className="text-center text-slate-500 py-10">暂无任务。批量开关机、应用模板、巡检都会在这里显示逐台结果。</td></tr>}
+            {!jobs && <tr><td colSpan="7" className="text-center text-slate-500 py-10">加载中…</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {openJob && <JobDialog id={openJob} onClose={() => setOpenJob(null)} onRetried={(nid) => { setOpenJob(nid); load(); }} reload={reload} />}
+    </div>
+  );
+}
+
+function JobDialog({ id, onClose, onRetried, reload }) {
+  const [j, setJ] = useState(null); const [onlyFail, setOnlyFail] = useState(false);
+  useEffect(() => { let stop = false; const poll = async () => { try { const d = await api(`/api/jobs/${id}`); if (stop) return; setJ(d); if (d.status === "running") setTimeout(poll, 2000); else reload(); } catch (e) { fail(e.message); } }; poll(); return () => { stop = true; }; }, [id]);
+  if (!j) return null;
+  const failedIds = j.items.filter(x => x.status === "failed").map(x => x.instance_id);
+  const retry = async () => {
+    try {
+      const body = { instance_ids: failedIds }; let path = "/api/jobs/inspect";
+      if (j.type === "power") { path = "/api/jobs/power"; body.action = j.params.action; body.fallback_types = j.params.fallback_types ?? null; }
+      if (j.type === "migrate") { path = "/api/jobs/migrate"; Object.assign(body, j.params); }
+      if (j.type === "terminate") { path = "/api/jobs/terminate"; body.backup = !!j.params.backup; }
+      if (j.type === "apply_template") { path = "/api/jobs/apply-template"; body.template_id = j.params.template_id; }
+      if (j.type === "share_sync") path = "/api/jobs/share-sync";
+      const r = await post(path, body); ok(`已创建重试任务 #${r.job_id}`); onRetried(r.job_id);
+    } catch (e) { fail(e.message); }
+  };
+  const items = onlyFail ? j.items.filter(x => x.status === "failed") : j.items;
+  return (
+    <Modal title={`任务 #${j.id} · ${j.title}`} onClose={onClose} width="max-w-3xl" footer={<>
+      {failedIds.length > 0 && j.status !== "running" && can("operator") && <Btn color="amber" onClick={retry}>重试失败的 {failedIds.length} 台</Btn>}<Btn onClick={onClose}>关闭</Btn></>}>
+      <div className="flex items-center gap-4 text-sm mb-3">
+        <span className={JOB_ST[j.status][1]}>{JOB_ST[j.status][0]}</span><span className="text-slate-400">完成 {j.done}/{j.total}</span>{j.failed > 0 && <span className="text-rose-300">失败 {j.failed}</span>}
+        <span className="text-slate-500 text-xs">{j.operator} · {fmtT(j.created_at)}</span>
+        {j.failed > 0 && <label className="ml-auto text-xs text-slate-400 flex items-center gap-1.5"><input type="checkbox" checked={onlyFail} onChange={e => setOnlyFail(e.target.checked)} />只看失败</label>}
+      </div>
+      <table className="w-full text-sm"><tbody>{items.map(x => <tr key={x.id} className="border-b border-slate-800">
+        <td className="py-2 pr-3 whitespace-nowrap">{x.name || x.instance_id}</td><td className={`pr-3 whitespace-nowrap ${ITEM_ST[x.status][1]}`}>{ITEM_ST[x.status][0]}</td>
+        <td className="text-xs text-slate-400">{x.message}</td><td className="text-xs text-slate-500 text-right whitespace-nowrap">{x.started_at && x.finished_at ? Math.max(1, Math.round(x.finished_at - x.started_at)) + " 秒" : ""}</td></tr>)}</tbody></table>
+    </Modal>
+  );
+}
+// ============================================================
+// 共享存储（S3 共享盘）
+// ============================================================
+const SHARE_ST = { ok: ["已挂载", "text-emerald-300 bg-emerald-500/10 border-emerald-500/30"], missing: ["未挂载", "text-amber-300 bg-amber-500/10 border-amber-500/30"],
+  failed: ["挂载失败", "text-rose-300 bg-rose-500/10 border-rose-500/40"], outdated: ["待更新", "text-amber-300 bg-amber-500/10 border-amber-500/30"],
+  stopped: ["未运行", "text-slate-400 border-slate-700"], unknown: ["待巡检", "text-slate-400 border-slate-700"] };
+const SharePill = ({ st }) => <Pill map={SHARE_ST} k={st} />;
+function ShareChips({ rows }) {
+  if (!rows || !rows.length) return <span className="text-slate-600">—</span>;
+  const c = { ok: "border-emerald-500/40 text-emerald-300", failed: "border-rose-500/50 text-rose-300", missing: "border-amber-500/40 text-amber-300", outdated: "border-amber-500/40 text-amber-300" };
+  return <span className="inline-flex gap-1">{rows.map(r => <span key={r.id} title={`${r.name}：${(SHARE_ST[r.status] || [r.status])[0]}${r.last_error ? "\n" + r.last_error : ""}`}
+    className={`font-mono text-[11px] px-1 rounded border ${c[r.status] || "border-slate-700 text-slate-500"}`}>{r.drive}:</span>)}</span>;
+}
+
+function SharesPage({ servers, reload }) {
+  const [data, setData] = useState(null); const [edit, setEdit] = useState(null); const [targets, setTargets] = useState(null); const [open, setOpen] = useState(null);
+  const load = useCallback(() => api("/api/shares").then(setData).catch(e => fail(e.message)), []);
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
+  const remove = async (s) => {
+    if (!await Confirm.ask({ title: "删除共享盘", danger: true, okText: "删除", typeToConfirm: s.name,
+      message: `删除共享盘「${s.name}」？\n\n· 会先在 ${s.servers.filter(x => x.state === "running").length} 台运行中的服务器上卸载 ${s.drive}:，等待未上传的文件写回 S3，然后撤销访问授权\n· S3 中的数据不会删除（${s.path}）\n· 已关机的服务器下次开机时不会再挂载` })) return;
+    try { const r = await del(`/api/shares/${s.id}`); ok(r.job_id ? `已删除，卸载任务 #${r.job_id} 执行中` : "已删除"); load(); setTimeout(reload, 3000); } catch (e) { fail(e.message); }
+  };
+  const resync = async (s) => { const ids = s.servers.map(x => x.instance_id); if (!ids.length) return;
+    try { const r = await post("/api/jobs/share-sync", { instance_ids: ids }); ok(`同步任务 #${r.job_id} 已开始`); } catch (e) { fail(e.message); } };
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-4 mb-3">
+        <div className="text-sm text-slate-400 max-w-3xl">把 S3 存储桶挂载为服务器上的盘符，所有登录用户都能像本地磁盘一样打开、保存文件，适合团队共享素材、交付文件和软件安装包。
+          访问权限按服务器授权，由 IAM 在 S3 侧强制执行；服务器重启后自动挂载，异常断开会自动重连。</div>
+        {can("admin") && <Btn color="blue" onClick={() => setEdit({})}>新建共享盘</Btn>}
+      </div>
+      <div className="space-y-3">
+        {data && data.shares.map(s => { const run = s.servers.filter(x => x.state === "running");
+          return <div key={s.id} className="bg-slate-900 border border-slate-700 rounded-xl">
+            <div className="flex items-center gap-4 p-4">
+              <div className="w-12 h-12 rounded-lg bg-sky-600/15 border border-sky-600/30 flex items-center justify-center font-mono text-lg text-sky-300 shrink-0">{s.drive}:</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2"><span className="font-semibold">{s.name}</span>
+                  <span className={`text-[10px] px-1 rounded border ${s.mode === "rw" ? "text-sky-300 border-sky-500/40" : "text-slate-300 border-slate-600"}`}>{s.mode === "rw" ? "读写" : "只读"}</span>
+                  {s.kms_key && <span className="text-[10px] px-1 rounded border text-violet-300 border-violet-500/40">KMS 加密</span>}</div>
+                <div className="text-xs text-slate-500 font-mono mt-0.5 truncate">{s.path} · {s.region}</div>
+              </div>
+              <div className="text-sm text-right shrink-0">
+                <div>{s.scope === "all" ? "全部服务器" : `${s.target_ids.length} 台服务器`}</div>
+                <div className="text-xs text-slate-400">{run.length ? <>已挂载 <span className="text-emerald-300">{s.mounted}</span> / {run.length} 台运行中</> : "暂无运行中的服务器"}{s.problems > 0 && <span className="text-amber-300 ml-1">· {s.problems} 台异常</span>}</div>
+              </div>
+              <div className="flex gap-1.5 shrink-0">
+                <Btn small color="ghost" onClick={() => setOpen(open === s.id ? null : s.id)}>{open === s.id ? "收起" : "服务器"}</Btn>
+                {can("admin") && s.scope === "selected" && <Btn small color="ghost" onClick={() => setTargets(s)}>授权服务器</Btn>}
+                {can("admin") && <Btn small color="ghost" onClick={() => setEdit(s)}>设置</Btn>}
+                {can("operator") && <Btn small color="ghost" onClick={() => resync(s)} disabled={!run.length}>重新同步</Btn>}
+                <a href={s.console_url} target="_blank"><Btn small color="ghost">S3 控制台</Btn></a>
+                {can("admin") && <Btn small color="ghost" onClick={() => remove(s)}>删除</Btn>}
+              </div>
+            </div>
+            {open === s.id && <div className="border-t border-slate-800 px-4 py-2"><table className="w-full text-sm"><tbody>
+              {s.servers.map(x => <tr key={x.instance_id} className="border-b border-slate-800/60 last:border-0">
+                <td className="py-1.5">{x.name || x.instance_id}</td><td><StateDot state={x.state} /></td><td><SharePill st={x.status} /></td>
+                <td className="text-xs text-slate-400">{x.pending > 0 ? `${x.pending} 个文件待上传` : ""}</td>
+                <td className="text-xs text-rose-300 max-w-md truncate" title={x.last_error}>{x.status !== "ok" ? x.last_error : ""}</td></tr>)}
+              {s.servers.length === 0 && <tr><td className="py-3 text-center text-slate-500">没有服务器</td></tr>}
+            </tbody></table></div>}
+          </div>; })}
+        {data && data.shares.length === 0 && <div className="bg-slate-900 border border-slate-700 rounded-xl text-center text-slate-500 py-12">还没有共享盘。{can("admin") ? "点击「新建共享盘」选择或创建 S3 存储桶。" : ""}</div>}
+        {!data && <div className="text-center text-slate-500 py-12">加载中…</div>}
+      </div>
+      {data && <div className="text-xs text-slate-500 mt-4 space-y-0.5">
+        <div>· 挂载组件：rclone + WinFsp（固定版本，下载后校验 SHA256），首次挂载时自动安装，约 1 分钟。</div>
+        <div>· 写入先落在本机缓存，文件关闭约 5 秒后上传；关机、卸载前平台会等待上传完成。多人同时编辑同一文件时以最后保存的为准，不支持文件锁。</div>
+        <div>· 授权附加在实例角色 {data.role} 上。只读共享盘在 S3 侧就拒绝写入和删除，改动主机上的挂载参数也无法绕过。</div>
+      </div>}
+      {edit && data && <ShareDialog share={edit.id ? edit : null} servers={servers} shares={data.shares} drives={data.drives} onClose={() => setEdit(null)} onDone={(r) => { setEdit(null); load(); if (r && r.job_id) ok(`挂载任务 #${r.job_id} 已开始，可在「任务中心」查看`); }} />}
+      {targets && <ShareTargetsDialog share={targets} servers={servers} onClose={() => setTargets(null)} onDone={() => { setTargets(null); load(); }} />}
+    </div>
+  );
+}
+
+function ShareDialog({ share, servers, shares, drives, onClose, onDone }) {
+  const editing = !!share;
+  const used = shares.filter(s => !share || s.id !== share.id).map(s => s.drive);
+  const freeDrive = [...drives].reverse().find(d => !used.includes(d) && !["C", "D"].includes(d)) || "S";
+  const [f, setF] = useState(share ? { ...share } : { name: "", bucket: "", prefix: "", drive: freeDrive, mode: "rw", scope: "selected", cache_gb: 20, kms_key: "" });
+  const [newBucket, setNewBucket] = useState(false); const [buckets, setBuckets] = useState(null); const [sel, setSel] = useState([]); const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF({ ...f, [k]: v });
+  useEffect(() => { if (!editing) api("/api/shares/buckets").then(d => setBuckets(d.buckets)).catch(() => setBuckets([])); }, []);
+  const b = buckets && buckets.find(x => x.name === f.bucket);
+  const crossRegion = b && CFG && b.region !== CFG.region;
+  const go = async () => {
+    setBusy(true);
+    try {
+      if (editing) {
+        const body = {}; ["name", "drive", "mode", "scope", "cache_gb"].forEach(k => { if (f[k] !== share[k]) body[k] = f[k]; });
+        if (!Object.keys(body).length) { onClose(); return; }
+        if (body.scope === "all" && !await Confirm.ask({ title: "改为全部服务器", message: `所有纳管服务器（${servers.length} 台，包括以后新建的）都将能访问 ${share.path}。确认？`, okText: "确认" })) { setBusy(false); return; }
+        if (body.mode === "ro" && !await Confirm.ask({ title: "改为只读", message: "改为只读后，服务器上缓存中尚未上传的文件会先等待上传完成再重新挂载。确认？", okText: "确认" })) { setBusy(false); return; }
+        onDone(await put(`/api/shares/${share.id}`, body));
+      } else {
+        if (f.scope === "all" && !await Confirm.ask({ title: "对全部服务器生效", message: `所有纳管服务器（${servers.length} 台，包括以后新建的）都会挂载此共享盘。确认？`, okText: "确认" })) { setBusy(false); return; }
+        onDone(await post("/api/shares", { ...f, create_bucket: newBucket, instance_ids: f.scope === "selected" ? sel : [] }));
+      }
+    } catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={editing ? `共享盘设置 · ${share.name}` : "新建共享盘"} onClose={onClose} width="max-w-3xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy}>{busy ? "处理中…（配置授权约 10 秒）" : editing ? "保存" : "创建并挂载"}</Btn></>}>
+      <div className="grid grid-cols-6 gap-3">
+        <div className="col-span-3"><Field label="名称（显示为磁盘卷标）"><Input value={f.name} onChange={e => set("name", e.target.value)} placeholder="如：设计素材库" className="w-full" /></Field></div>
+        <div className="col-span-1"><Field label="盘符"><Select value={f.drive} onChange={e => set("drive", e.target.value)} className="w-full">{drives.filter(d => !used.includes(d)).map(d => <option key={d} value={d}>{d}:</option>)}</Select></Field></div>
+        <div className="col-span-2"><Field label="访问方式"><Select value={f.mode} onChange={e => set("mode", e.target.value)} className="w-full"><option value="rw">读写</option><option value="ro">只读</option></Select></Field></div>
+        {!editing && <>
+          <div className="col-span-6 flex gap-4 text-sm">
+            <label className="flex items-center gap-1.5"><input type="radio" checked={!newBucket} onChange={() => setNewBucket(false)} />使用已有存储桶</label>
+            <label className="flex items-center gap-1.5"><input type="radio" checked={newBucket} onChange={() => setNewBucket(true)} />新建存储桶</label></div>
+          <div className="col-span-3"><Field label="存储桶" hint={newBucket ? `将在 ${CFG ? CFG.region : ""} 创建，自动开启公共访问阻止、版本控制（旧版本保留 30 天）` : crossRegion ? `该存储桶位于 ${b.region}，与服务器不在同一区域，会产生跨区域流量费用且速度较慢` : ""}>
+            {newBucket ? <Input value={f.bucket} onChange={e => set("bucket", e.target.value.toLowerCase())} placeholder="全球唯一，如 corp-dcv-share-2026" className="w-full font-mono" />
+              : <><Input list="dl-buckets" value={f.bucket} onChange={e => set("bucket", e.target.value.toLowerCase())} placeholder={buckets ? "选择或输入存储桶名称" : "读取中…"} className="w-full font-mono" />
+                <datalist id="dl-buckets">{(buckets || []).map(x => <option key={x.name} value={x.name}>{x.region}</option>)}</datalist></>}</Field></div>
+          <div className="col-span-3"><Field label="存储桶内路径（可选）" hint="只挂载该路径下的内容，如 projects/design；留空表示整个存储桶"><Input value={f.prefix} onChange={e => set("prefix", e.target.value)} className="w-full font-mono" /></Field></div>
+        </>}
+        {editing && <div className="col-span-6 text-xs text-slate-400 bg-slate-800/50 rounded-lg px-3 py-2 font-mono">{share.path}（{share.region}）· 存储位置创建后不能修改</div>}
+        <div className="col-span-2"><Field label="每台服务器本地缓存上限（GB）" hint="大文件会先缓存到系统盘"><Input type="number" min="1" max="500" value={f.cache_gb} onChange={e => set("cache_gb", Number(e.target.value) || 1)} className="w-full" /></Field></div>
+        {!editing && <div className="col-span-4"><Field label="KMS 密钥 ARN（可选）" hint="存储桶使用自定义 KMS 密钥加密时填写，平台会授予服务器使用该密钥的权限"><Input value={f.kms_key} onChange={e => set("kms_key", e.target.value)} className="w-full font-mono" /></Field></div>}
+        <div className="col-span-6"><Field label="适用范围"><div className="flex gap-4 text-sm">
+          <label className="flex items-center gap-1.5"><input type="radio" checked={f.scope === "selected"} onChange={() => set("scope", "selected")} />指定服务器</label>
+          <label className="flex items-center gap-1.5"><input type="radio" checked={f.scope === "all"} onChange={() => set("scope", "all")} />全部服务器（包括以后新建的）</label></div></Field></div>
+        {!editing && f.scope === "selected" && <div className="col-span-6"><ServerPicker servers={servers} value={sel} onChange={setSel} /></div>}
+        {editing && f.scope === "selected" && share.scope === "all" && <div className="col-span-6 text-xs text-amber-300">改为指定服务器后，当前没有被授权的服务器将立即失去访问并卸载。保存前请先确认授权名单（{share.target_ids.length} 台）。</div>}
+      </div>
+    </Modal>
+  );
+}
+
+function ShareTargetsDialog({ share, servers, onClose, onDone }) {
+  const [sel, setSel] = useState(share.target_ids); const [busy, setBusy] = useState(false);
+  const add = sel.filter(i => !share.target_ids.includes(i)); const remove = share.target_ids.filter(i => !sel.includes(i));
+  const name = (id) => (servers.find(s => s.instance_id === id) || {}).name || id;
+  const go = async () => {
+    if (!add.length && !remove.length) { onClose(); return; }
+    if (remove.length && !await Confirm.ask({ title: "取消授权", message: `${remove.length} 台服务器将卸载 ${share.drive}: 并失去访问权限（未上传的文件会先写回 S3）：`, list: remove.map(name), danger: true, okText: "确认" })) return;
+    setBusy(true);
+    try { const r = await post(`/api/shares/${share.id}/targets`, { add, remove }); ok(`授权已更新${r.job_id ? `，同步任务 #${r.job_id} 已开始` : ""}`); onDone(); } catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={`授权服务器 · ${share.name}（${share.drive}:）`} onClose={onClose} width="max-w-3xl" footer={<>
+      <span className="text-xs text-slate-400 mr-auto self-center">{add.length ? `新增 ${add.length} 台` : ""}{add.length && remove.length ? "，" : ""}{remove.length ? `移除 ${remove.length} 台` : ""}</span>
+      <Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy}>保存</Btn></>}>
+      <ServerPicker servers={servers} value={sel} onChange={setSel} />
+      <div className="text-xs text-slate-500 mt-3">未授权的服务器即使手动配置挂载，S3 也会拒绝访问。</div>
+    </Modal>
+  );
+}
+
+// ============================================================
+// 容量检测
+// ============================================================
+const CAP = { available: ["有容量", "text-emerald-300", "bg-emerald-500/15 border-emerald-500/40"], likely: ["大概率可用", "text-sky-300", "bg-sky-500/10 border-sky-500/30"],
+  limited: ["紧张", "text-amber-300", "bg-amber-500/10 border-amber-500/30"], unavailable: ["容量不足", "text-rose-300", "bg-rose-500/15 border-rose-500/40"],
+  unknown: ["未知", "text-slate-400", "bg-slate-800/40 border-slate-700"], not_offered: ["不提供", "text-slate-600", "bg-transparent border-slate-800"] };
+
+function CapacityPage({ servers: allServers }) {
+  const [region, setRegion] = useState((CFG && CFG.region) || "");
+  const servers = allServers.filter(x => !region || x.region === region);
+  const [d, setD] = useState(null); const [busy, setBusy] = useState(false); const [sel, setSel] = useState([]); const [count, setCount] = useState(1); const [probing, setProbing] = useState(false);
+  const load = useCallback(async (refresh) => { setBusy(true); try { setD(await api(capUrl(region, refresh))); } catch (e) { fail(e.message); } finally { setBusy(false); } }, [region]);
+  useEffect(() => { setD(null); setSel([]); }, [region]);
+  useEffect(() => { load(false); const t = setInterval(() => load(false), 60000); return () => clearInterval(t); }, [load]);
+  const key = (c) => c.az + "|" + c.type;
+  const toggle = (c) => { if (!c.offered) return; setSel(sel.includes(key(c)) ? sel.filter(k => k !== key(c)) : [...sel, key(c)]); };
+  const probe = async (pairs) => {
+    if (!await Confirm.ask({ title: "实测容量", okText: "开始实测", message: `将在 ${pairs.length} 个「可用区 × 机型」组合上创建 ${count} 台的按需容量预留并立即取消，以确认此刻能否开出。\n\n· 每个组合约 2–15 秒，预留存在不到几秒，按秒计费，费用可忽略\n· 结论只代表此刻，GPU 容量随时变化` })) return;
+    setProbing(true);
+    try { const r = await post("/api/capacity/probe", { pairs: pairs.map(k => k.split("|")), count });
+      const bad = r.results.filter(x => !x.ok); ok(`实测完成：${r.results.length - bad.length} 个有容量，${bad.length} 个不足`); setSel([]); await load(true); }
+    catch (e) { fail(e.message); } finally { setProbing(false); }
+  };
+  const regionBar = multiRegion() && <div className="flex flex-wrap items-center gap-2 mb-4"><span className="text-sm text-slate-400">区域</span>
+    {CFG.regions.map(r => <button key={r} onClick={() => setRegion(r)} className={`px-3 py-1.5 rounded-lg border text-sm ${region === r ? "border-sky-500 bg-sky-500/10 text-white" : "border-slate-700 text-slate-300"}`}>{regionShort(r)} <span className="text-[11px] text-slate-500">{r}</span>
+      <span className="text-[11px] text-slate-400 ml-1">· {allServers.filter(x => x.region === r).length} 台</span></button>)}</div>;
+  if (!d) return <div>{regionBar}<div className="text-slate-500 text-center py-16">正在查询 {regionName(region)} 各可用区容量…</div></div>;
+  const q = d.quota || {}; const failed = servers.filter(s => s.start_failed);
+  return (
+    <div className="space-y-4">
+      {regionBar}
+      <div className="flex items-start justify-between gap-4">
+        <div className="text-sm text-slate-400 max-w-4xl">GPU 按需容量随时变化，AWS 不直接公布剩余量。这里综合四类信号判断：<span className="text-slate-300">实测</span>（创建并立即取消容量预留，最准确）、
+          <span className="text-slate-300">最近真实开机失败</span>、Spot 放置分数（仅参考）、以及机型在该可用区是否提供。</div>
+        <div className="flex items-center gap-2 shrink-0"><span className="text-xs text-slate-500">更新于 {new Date(d.generated_at * 1000).toLocaleTimeString("zh-CN", { hour12: false })}</span>
+          <Btn small color="ghost" onClick={() => load(true)} disabled={busy}>{busy ? "刷新中…" : "刷新"}</Btn></div>
+      </div>
+      {failed.length > 0 && <div className="bg-rose-500/10 border border-rose-500/40 rounded-xl px-4 py-3 text-sm text-rose-200">
+        {failed.length} 台服务器最近开机失败（容量不足）：{failed.map(s => `${s.name}（${s.az} ${s.instance_type}）`).join("、")}。可在服务器详情中「改用其他机型开机」。</div>}
+      <div className="grid grid-cols-4 gap-3">
+        <div className="bg-slate-900 border border-slate-700 rounded-xl p-3"><div className="text-[11px] text-slate-400">G 系列按需 vCPU 配额{multiRegion() ? `（${regionShort(region)}）` : ""}</div>
+          {q.error ? <div className="text-xs text-slate-500 mt-1">无法读取</div> : <><div className="text-xl font-semibold mt-0.5">{q.free}<span className="text-sm text-slate-500"> / {q.limit} 可用</span></div>
+            <div className="text-[11px] text-slate-500">约可再开 {Math.floor(q.free / 4)} 台 g6f.xlarge；配额不足与容量不足不同，需在 Service Quotas 申请提额</div></>}</div>
+        {d.zones.map(z => <div key={z.az} className="bg-slate-900 border border-slate-700 rounded-xl p-3"><div className="text-[11px] text-slate-400">{z.az}</div>
+          <div className="text-xl font-semibold mt-0.5">{z.servers}<span className="text-sm text-slate-500"> 台服务器</span></div>
+          <div className="text-[11px] text-slate-500">{z.subnet ? `可创建服务器（${z.subnet}）` : "没有可用的公有子网，不能在此创建"}</div></div>)}
+      </div>
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2 w-36">可用区</th>
+            {d.types.map(t => <th key={t.type} className="text-left px-3 py-2">{t.type}<span className="text-slate-500 font-normal ml-1.5">{t.cpu}C / {gib(t.memory_mib)} / 显存 {gib(t.gpu_memory_mib)}</span>
+              <div className="font-normal"><PriceTag region={region} type={t.type} compact /></div></th>)}</tr></thead>
+          <tbody>{d.zones.map(z => <tr key={z.az} className="border-b border-slate-800">
+            <td className="px-3 py-2 align-top font-medium">{z.az}</td>
+            {d.types.map(t => { const c = d.cells.find(x => x.az === z.az && x.type === t.type); const [lab, tc, bc] = CAP[c.status]; const on = sel.includes(key(c));
+              return <td key={t.type} className="px-2 py-2 align-top">
+                <div onClick={() => toggle(c)} className={`rounded-lg border p-2.5 ${bc} ${c.offered ? "cursor-pointer hover:brightness-125" : ""} ${on ? "ring-2 ring-sky-500" : ""}`}>
+                  <div className="flex items-center justify-between"><span className={`font-medium ${tc}`}>{lab}</span>
+                    {c.offered && c.spot_score != null && <span className="text-[10px] text-slate-500" title="Spot 放置分数 1–10，仅供参考">Spot {c.spot_score}</span>}</div>
+                  <div className="text-[11px] text-slate-400 mt-1 leading-snug">{c.reason}</div>
+                  {c.servers > 0 && <div className="text-[11px] text-slate-500 mt-1">本区 {c.servers} 台此机型（{c.running} 台运行中）</div>}
+                  {c.failures.length > 0 && <div className="text-[11px] text-rose-300/80 mt-1">最近失败：{c.failures.slice(0, 2).map(f => `${new Date(f.time).toLocaleTimeString("zh-CN", { hour12: false })} ${f.source}`).join("，")}</div>}
+                </div></td>; })}
+          </tr>)}</tbody>
+        </table>
+      </div>
+      {can("operator") && <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm text-slate-400">实测：{sel.length ? `已选 ${sel.length} 个组合` : "点击上方格子选择组合"}</span>
+        <label className="text-sm text-slate-400 flex items-center gap-1.5">每个组合台数 <Input type="number" min="1" max="20" value={count} onChange={e => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))} className="w-16" /></label>
+        <Btn color="blue" disabled={!sel.length || probing} onClick={() => probe(sel)}>{probing ? "实测中…" : "实测所选"}</Btn>
+        <Btn color="ghost" disabled={probing} onClick={() => probe(d.cells.filter(c => c.offered).map(key))}>实测全部可用组合</Btn>
+        <span className="text-xs text-slate-500">批量开机或新建前建议按计划台数实测，例如早上 20 台同时开机时填 20。</span>
+      </div>}
+      <div className="text-xs text-slate-500 space-y-0.5">
+        <div>· 已有服务器的系统盘绑定所在可用区，缺货时最快的办法是<span className="text-slate-300">关机状态下改机型</span>（g6f 各规格资源池独立）；换可用区需要快照后重建。</div>
+        <div>· 新建服务器时选择「自动选择」或「多可用区均衡分布」，平台按这里的结论排序，某可用区不足时自动换下一个。</div>
+        <div>· 关键岗位如需保证随时能开机，可在 AWS 控制台购买按需容量预留（按预留时长计费）。</div>
+      </div>
+    </div>
+  );
+}
+
+function CapacityAdvice({ inst, reload }) {
+  const [alt, setAlt] = useState(null); const [dlg, setDlg] = useState(false);
+  useEffect(() => { api(`/api/instances/${inst.instance_id}/capacity`).then(setAlt).catch(() => {}); }, [inst.instance_id]);
+  const good = alt ? alt.change_type.filter(c => ["available", "likely"].includes(c.status)) : [];
+  return <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg p-3 text-sm">
+    <div className="text-rose-200 font-medium">开机失败：{inst.az} 暂无 {inst.instance_type} 容量</div>
+    <div className="text-xs text-slate-300 mt-1.5">{!alt ? "正在查询同可用区其他机型…" : good.length ? <>同可用区可用的机型：{good.map(c => <span key={c.type} className={`mr-2 ${CAP[c.status][1]}`}>{c.type}（{CAP[c.status][0]}）</span>)}</> : "同可用区其他机型当前也紧张，建议稍后重试。"}</div>
+    {alt && alt.other_zones.some(c => ["available", "likely"].includes(c.status)) && <div className="text-xs text-slate-400 mt-1">其他可用区有 {inst.instance_type}：{alt.other_zones.filter(c => ["available", "likely"].includes(c.status)).map(c => c.az).join("、")}（需快照后在该可用区重建）</div>}
+    {can("operator") && <div className="flex gap-2 mt-2.5"><Btn small color="amber" onClick={() => setDlg("start")}>改用其他机型开机</Btn>
+      {can("admin") && <Btn small onClick={() => setDlg("migrate")}>迁移到其他可用区</Btn>}</div>}
+    {dlg === "start" && <StartDialog servers={[inst]} preferFallback onClose={() => setDlg(false)} onDone={() => { setDlg(false); setTimeout(reload, 1500); }} />}
+    {dlg === "migrate" && <MigrateDialog servers={[inst]} onClose={() => setDlg(false)} onDone={() => { setDlg(false); setTimeout(reload, 1500); }} />}
+  </div>;
+}
+
+function TypeOrder({ order, setOrder, exclude, az, cap }) {
+  const types = ((CFG && CFG.allowed_types) || []).filter(t => !exclude.includes(t));
+  const status = (t) => { const c = cap && az && cap.cells.find(x => x.az === az && x.type === t); return c ? CAP[c.status] : null; };
+  const move = (i, d) => { const o = [...order]; [o[i], o[i + d]] = [o[i + d], o[i]]; setOrder(o); };
+  const rest = types.filter(t => !order.includes(t));
+  return <div className="space-y-1">
+    {order.map((t, i) => { const st = status(t); return <div key={t} className="flex items-center gap-2 text-sm bg-slate-800/40 rounded px-2 py-1">
+      <span className="w-5 text-slate-500">{i + 1}.</span><span className="w-28">{t}</span><PriceTag region={az ? az.replace(/[a-z]$/, "") : null} type={t} base={exclude[0]} compact />
+      {st && <span className={`text-xs ${st[1]}`}>{az}：{st[0]}</span>}
+      <span className="ml-auto flex gap-1"><Btn small color="ghost" disabled={i === 0} onClick={() => move(i, -1)}>↑</Btn><Btn small color="ghost" disabled={i === order.length - 1} onClick={() => move(i, 1)}>↓</Btn>
+        <Btn small color="ghost" onClick={() => setOrder(order.filter(x => x !== t))}>移除</Btn></span></div>; })}
+    {!order.length && <div className="text-xs text-slate-500">未选择机型</div>}
+    {rest.length > 0 && <div className="flex flex-wrap gap-1.5 pt-1"><span className="text-xs text-slate-500 self-center">添加：</span>{rest.map(t => <Btn key={t} small color="ghost" onClick={() => setOrder([...order, t])}>+ {t}</Btn>)}</div>}
+  </div>;
+}
+
+function StartDialog({ servers, onClose, onDone, preferFallback }) {
+  const stopped = servers.filter(s => s.state === "stopped");
+  const [mode, setMode] = useState("server"); const [order, setOrder] = useState(() => (stopped[0] && stopped[0].fallback_types) || []);
+  const [cap, setCap] = useState(null); const [busy, setBusy] = useState(false);
+  useEffect(() => { const rs = [...new Set(stopped.map(x => x.region))];
+    Promise.all(rs.map(r => api(capUrl(r)))).then(ds => setCap({ cells: ds.flatMap(d => d.cells), zones: ds.flatMap(d => d.zones) })).catch(() => {}); }, []);
+  const byAz = {}; stopped.forEach(s => { const k = s.az + " " + s.instance_type; byAz[k] = (byAz[k] || 0) + 1; });
+  const status = (az, t) => { const c = cap && cap.cells.find(x => x.az === az && x.type === t); return c ? CAP[c.status] : null; };
+  const noFb = stopped.filter(s => !s.fallback_types.length);
+  const go = async () => {
+    setBusy(true);
+    try { const r = await post("/api/jobs/power", { instance_ids: servers.map(s => s.instance_id), action: "start", fallback_types: mode === "server" ? null : mode === "custom" ? order : [] });
+      ok(`开机任务 #${r.job_id} 已创建，可在「任务中心」查看逐台结果`); onDone(); } catch (e) { fail(e.message); setBusy(false); }
+  };
+  const R = ({ v, children }) => <label className={`flex items-start gap-2 text-sm cursor-pointer px-3 py-2 rounded-lg border ${mode === v ? "border-sky-500 bg-sky-500/10" : "border-slate-700"}`}><input type="radio" className="mt-0.5" checked={mode === v} onChange={() => setMode(v)} /><div>{children}</div></label>;
+  return (
+    <Modal title={`开机（${stopped.length} 台）`} onClose={onClose} width="max-w-2xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="green" onClick={go} disabled={busy || !stopped.length || (mode === "custom" && !order.length)}>{busy ? "提交中…" : "开机"}</Btn></>}>
+      {servers.length > stopped.length && <div className="text-xs text-slate-400 mb-3">{servers.length - stopped.length} 台不是已停止状态，将跳过。</div>}
+      {preferFallback && <div className="text-xs text-amber-300 mb-3">上次开机因容量不足失败，建议选择下面的自动换机型方式。</div>}
+      <div className="text-xs text-slate-400 mb-1.5">当前容量</div>
+      <div className="space-y-1 mb-4">{Object.entries(byAz).map(([k, n]) => { const [az, t] = k.split(" "); const st = status(az, t);
+        return <div key={k} className="flex justify-between text-sm bg-slate-800/40 rounded px-3 py-1.5"><span>{az} · {t} · {n} 台</span><span className={st ? st[1] : "text-slate-500"}>{st ? st[0] : "查询中…"}</span></div>; })}</div>
+      <div className="text-xs text-slate-400 mb-1.5">容量不足时</div>
+      <div className="space-y-2">
+        <R v="server">按各服务器的备选机型自动换机型<div className="text-xs text-slate-500 mt-0.5">{stopped.length === 1 ? (stopped[0].fallback_types.join(" → ") || "该服务器未设置备选机型") : `${stopped.length - noFb.length} 台已有备选机型${noFb.length ? `，${noFb.length} 台未设置（不换机型）` : ""}`}。与定时开机规则一致。</div></R>
+        <R v="custom">本次指定换机型顺序<div className="text-xs text-slate-500 mt-0.5">只对本次开机生效，不修改服务器设置。</div></R>
+        {mode === "custom" && <div className="ml-6"><TypeOrder order={order} setOrder={setOrder} exclude={[...new Set(stopped.map(s => s.instance_type))]} az={stopped[0] && stopped[0].az} cap={cap} /></div>}
+        <R v="none">不换机型，只尝试原机型</R>
+      </div>
+      <div className="text-xs text-slate-500 mt-3">临时换用的机型在关机后自动改回原机型；全部失败时机型保持不变。机型不同会影响 CPU、内存、显存和费用。</div>
+    </Modal>
+  );
+}
+
+function FallbackDialog({ servers, onClose, onDone }) {
+  const one = servers.length === 1 ? servers[0] : null;
+  const [mode, setMode] = useState(one ? (one.fallback_custom ? (one.fallback_types.length ? "custom" : "none") : "default") : "default");
+  const [order, setOrder] = useState(one ? one.fallback_types : []); const [busy, setBusy] = useState(false);
+  const types = [...new Set(servers.map(s => s.fallback_from || s.instance_type))];
+  const defs = (CFG && CFG.default_fallback) || {};
+  const go = async () => {
+    setBusy(true);
+    try { await post("/api/instances/fallback", { instance_ids: servers.map(s => s.instance_id), types: mode === "default" ? null : mode === "none" ? [] : order });
+      ok(`已更新 ${servers.length} 台服务器的备选机型`); onDone(); } catch (e) { fail(e.message); setBusy(false); }
+  };
+  const R = ({ v, children }) => <label className={`flex items-start gap-2 text-sm cursor-pointer px-3 py-2 rounded-lg border ${mode === v ? "border-sky-500 bg-sky-500/10" : "border-slate-700"}`}><input type="radio" className="mt-0.5" checked={mode === v} onChange={() => setMode(v)} /><div>{children}</div></label>;
+  return <Modal title={`备选机型 · ${one ? one.name : servers.length + " 台服务器"}`} onClose={onClose} width="max-w-xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy || (mode === "custom" && !order.length)}>保存</Btn></>}>
+    <div className="text-sm text-slate-400 mb-3">开机（包括定时开机）时原机型容量不足，按顺序改用下列机型，在同一可用区重试；本次用完关机后自动改回原机型。</div>
+    <div className="space-y-2">
+      <R v="default">使用默认顺序<div className="text-xs text-slate-500 mt-0.5">{types.map(t => `${t}：${(defs[t] || []).map(x => { const p = priceOf(one ? one.region : null, x); const b = priceOf(one ? one.region : null, t); return x + (p != null && b ? `（${diffPct(p, b) || "同价"}）` : ""); }).join(" → ") || "不换机型"}`).join("；")}</div></R>
+      <R v="custom">自定义顺序</R>
+      {mode === "custom" && <div className="ml-6"><TypeOrder order={order} setOrder={setOrder} exclude={types} az={one && one.az} cap={null} /></div>}
+      <R v="none">不自动换机型<div className="text-xs text-slate-500 mt-0.5">容量不足时直接报开机失败，适合对显卡型号有严格要求的岗位。</div></R>
+    </div>
+    <div className="text-xs text-slate-500 mt-3">临时机型按其单价计费，括号内为相对原机型的价格差。g4dn 为 T4 显卡（16 GB 显存），g5 为 A10G（24 GB）。首次使用某种备选机型前，建议用快照新建一台该机型测试显卡驱动与 DCV。</div>
+  </Modal>;
+}
+
+function TerminateDialog({ servers, onClose, onDone }) {
+  const conn = servers.filter(x => x.state === "running" && ((x.inspection || {}).connections || 0) > 0);
+  const busy = servers.filter(x => x.busy);
+  const [backup, setBackup] = useState(false); const [force, setForce] = useState(false);
+  const [typed, setTyped] = useState(""); const [sending, setSending] = useState(false);
+  const word = servers.length === 1 ? (servers[0].name || servers[0].instance_id) : `删除 ${servers.length} 台`;
+  const go = async () => {
+    setSending(true);
+    try { const r = await post("/api/jobs/terminate", { instance_ids: servers.map(x => x.instance_id), backup, force_connected: force });
+      ok(`删除任务 #${r.job_id} 已开始${backup ? "，备份完成后才会删除" : ""}，可在「任务中心」查看`); onDone(); }
+    catch (e) { fail(e.message); setSending(false); }
+  };
+  return <Modal title={`删除服务器（${servers.length} 台）`} onClose={onClose} width="max-w-xl" footer={<><Btn onClick={onClose}>取消</Btn>
+      <Btn color="red" onClick={go} disabled={sending || typed !== word || busy.length > 0 || (conn.length > 0 && !force)}>{sending ? "提交中…" : "确认删除"}</Btn></>}>
+    <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg px-3 py-2 text-sm text-rose-200 mb-3">
+      删除后实例和系统盘无法恢复，服务器上的用户文件会一并删除（共享盘中的文件不受影响）。</div>
+    <div className="max-h-40 overflow-auto scrollbar mb-3 space-y-1">{servers.map(x => <div key={x.instance_id} className="flex justify-between text-sm bg-slate-800/40 rounded px-3 py-1.5">
+      <span>{x.name || x.instance_id}<span className="text-xs text-slate-500 ml-2">{x.assignee || ""} {multiRegion() ? regionShort(x.region) : ""} {x.instance_type}</span></span>
+      <span className="text-xs">{x.busy ? <span className="text-amber-300">有任务进行中</span> : (x.state === "running" && ((x.inspection || {}).connections || 0) > 0) ? <span className="text-rose-300">{x.inspection.connections} 人连接中</span> : <StateDot state={x.state} />}</span></div>)}</div>
+    {busy.length > 0 && <div className="text-xs text-amber-300 mb-2">{busy.length} 台有未完成的任务，请等任务结束后再删除。</div>}
+    {conn.length > 0 && <label className="flex items-start gap-2 text-sm mb-2 text-rose-200"><input type="checkbox" className="mt-0.5" checked={force} onChange={e => setForce(e.target.checked)} />
+      <span>{conn.length} 台有用户正在连接，仍然删除（会立即中断其工作）</span></label>}
+    <label className="flex items-start gap-2 text-sm mb-3"><input type="checkbox" className="mt-0.5" checked={backup} onChange={e => setBackup(e.target.checked)} />
+      <span>删除前先制作备份快照（推荐）<div className="text-xs text-slate-500">包含全部磁盘，完成后才删除服务器（约 5–20 分钟）。备份显示在「快照与镜像」中，可用来恢复；快照存储约 $0.054/GB·月，按磁盘已用空间计费，不用时可在快照页删除。</div></span></label>
+    <div className="text-xs text-slate-400 mb-3">同时会清理：权限模板绑定、自定义权限、共享盘授权、定时任务中的这些服务器（定时任务只剩它们时一并删除）；弹性 IP 会解除关联但保留在账号中。</div>
+    <L t={<>请输入 <span className="font-mono text-rose-300">{word}</span> 确认</>}><Input className="w-full" value={typed} onChange={e => setTyped(e.target.value)} autoFocus /></L>
+  </Modal>;
+}
+
+function MigrateDialog({ servers, onClose, onDone }) {
+  const stopped = servers.filter(s => s.state === "stopped");
+  const [cap, setCap] = useState(null); const [zone, setZone] = useState("auto"); const [type, setType] = useState("");
+  const [delOld, setDelOld] = useState(true); const [keepStopped, setKeepStopped] = useState(false); const [busy, setBusy] = useState(false);
+  useEffect(() => { api(capUrl(stopped[0] ? stopped[0].region : null)).then(setCap).catch(e => fail(e.message)); }, []);
+  const srcRegions = [...new Set(stopped.map(s => s.region))];
+  const srcZones = [...new Set(stopped.map(s => s.az))]; const srcTypes = [...new Set(stopped.map(s => s.fallback_from || s.instance_type))];
+  const effType = type || (srcTypes.length === 1 ? srcTypes[0] : "");
+  const zones = cap ? cap.zones.filter(z => z.subnet) : [];
+  const st = (az) => { const c = cap && effType && cap.cells.find(x => x.az === az && x.type === effType); return c ? (c.offered ? CAP[c.status] : ["不提供", "text-slate-500"]) : null; };
+  const go = async () => {
+    const msg = `将把 ${stopped.length} 台服务器迁移到${zone === "auto" ? "容量最好的其他可用区" : " " + zone}。\n\n· 先实测目标可用区容量，没容量不会做任何改动\n· 每台约 10–30 分钟，期间无法使用\n· 实例 ID、公网和私网 IP 会变化（弹性 IP 会自动转移），用户需使用新的连接地址\n· 系统盘、DCV 配置、用户文件、权限模板、共享盘、定时任务全部保留\n· ${delOld ? "新服务器验证通过后删除原服务器" : "原服务器保留（已停止，不再纳管）"}；迁移备份镜像保留在「快照与镜像」中`;
+    if (!await Confirm.ask({ title: "迁移可用区", message: msg, list: stopped.map(s => `${s.name || s.instance_id}（${s.az}）`), danger: true, okText: "开始迁移", typeToConfirm: stopped.length >= 3 ? String(stopped.length) : null })) return;
+    setBusy(true);
+    try { const r = await post("/api/jobs/migrate", { instance_ids: stopped.map(s => s.instance_id), target_zone: zone, instance_type: type || null, delete_old: delOld, keep_stopped: keepStopped });
+      ok(`迁移任务 #${r.job_id} 已开始，可在「任务中心」查看每台进度`); onDone(); } catch (e) { fail(e.message); setBusy(false); }
+  };
+  return <Modal title={`迁移可用区（${stopped.length} 台）`} onClose={onClose} width="max-w-2xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy || !stopped.length || srcRegions.length > 1}>{busy ? "提交中…" : "开始迁移"}</Btn></>}>
+    {servers.length > stopped.length && <div className="text-xs text-amber-300 mb-3">{servers.length - stopped.length} 台未关机，不参与迁移。迁移前请先关机。</div>}
+    {srcRegions.length > 1 && <div className="text-sm text-rose-300 mb-3">所选服务器分布在 {srcRegions.map(regionShort).join("、")}，可用区迁移只能在同一区域内进行，请按区域分别迁移。</div>}
+    <div className="text-sm text-slate-400 mb-3">{multiRegion() && srcRegions.length === 1 ? `区域 ${regionName(srcRegions[0])}，` : ""}当前位于 {srcZones.join("、") || "—"}，机型 {srcTypes.join("、") || "—"}。适合某个可用区长期缺货；偶尔缺货用「备选机型」更快。</div>
+    <div className="text-xs text-slate-400 mb-1.5">目标可用区</div>
+    <div className="flex flex-wrap gap-2 mb-4">
+      <button onClick={() => setZone("auto")} className={`px-3 py-1.5 rounded-lg border text-sm ${zone === "auto" ? "border-emerald-500 bg-emerald-500/10" : "border-slate-700"}`}>自动选择</button>
+      {zones.map(z => { const x = st(z.az); const same = srcZones.length === 1 && srcZones[0] === z.az;
+        return <button key={z.az} disabled={same} onClick={() => setZone(z.az)} className={`px-3 py-1.5 rounded-lg border text-sm ${zone === z.az ? "border-emerald-500 bg-emerald-500/10" : "border-slate-700"} ${same ? "opacity-40 cursor-not-allowed" : ""}`}>
+          {z.az}{same ? " · 当前" : x ? <span className={`ml-1 ${x[1]}`}>· {x[0]}</span> : ""}</button>; })}
+    </div>
+    <div className="text-xs text-slate-400 mb-1.5">机型</div>
+    <Select value={type} onChange={e => setType(e.target.value)} className="w-full mb-4"><option value="">保持原机型{srcTypes.length === 1 ? `（${srcTypes[0]}）` : ""}</option>{((CFG && CFG.allowed_types) || []).map(t => <option key={t} value={t}>{t}{priceOf(srcRegions[0], t) != null ? ` · ${hourly(priceOf(srcRegions[0], t))}` : ""}</option>)}</Select>
+    <label className="flex items-start gap-2 text-sm cursor-pointer mb-2"><input type="checkbox" className="mt-0.5" checked={delOld} onChange={e => setDelOld(e.target.checked)} />
+      <span>新服务器验证通过后删除原服务器<div className="text-xs text-slate-500">不勾选则保留原服务器（已停止，不再纳管，磁盘继续计费）。验证未通过时一律保留。</div></span></label>
+    <label className="flex items-start gap-2 text-sm cursor-pointer"><input type="checkbox" className="mt-0.5" checked={keepStopped} onChange={e => setKeepStopped(e.target.checked)} />
+      <span>迁移完成后关机<div className="text-xs text-slate-500">默认保持开机，用户可以直接使用。</div></span></label>
+  </Modal>;
+}
+
+function ChangeTypeDialog({ inst, preset, onClose, onDone }) {
+  const types = ((CFG && CFG.allowed_types) || []).filter(t => t !== inst.instance_type);
+  const [t, setT] = useState(preset || types[0]); const [cap, setCap] = useState(null); const [busy, setBusy] = useState(false);
+  useEffect(() => { api(capUrl(inst.region)).then(setCap).catch(() => {}); }, []);
+  const go = async () => { setBusy(true); try { await post(`/api/instances/${inst.instance_id}/type`, { instance_type: t }); ok(`已改为 ${t}`); onDone(); } catch (e) { fail(e.message); setBusy(false); } };
+  return <Modal title={`更改机型 · ${inst.name}`} onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy || !t}>确认更改</Btn></>}>
+    <div className="text-sm text-slate-400 mb-3">当前 {inst.instance_type}（{hourly(priceOf(inst.region, inst.instance_type))}），位于 {inst.az}。更改后实例 ID、系统盘、权限与共享盘配置不变。</div>
+    <div className="space-y-1.5">{types.map(x => { const c = cap && cap.cells.find(y => y.az === inst.az && y.type === x);
+      return <label key={x} className={`flex items-center justify-between px-3 py-2 rounded-lg border cursor-pointer ${t === x ? "border-sky-500 bg-sky-500/10" : "border-slate-700"}`}>
+        <span className="flex items-center gap-2"><input type="radio" checked={t === x} onChange={() => setT(x)} />{x}<PriceTag region={inst.region} type={x} base={inst.instance_type} compact /></span>
+        <span className={`text-xs ${c ? CAP[c.status][1] : "text-slate-500"}`}>{c ? `${inst.az}：${CAP[c.status][0]}` : "…"}</span></label>; })}</div>
+  </Modal>;
+}
+
+// ============================================================
+// 快照与镜像
+// ============================================================
+const IMG_ST = { available: ["可用", "text-emerald-300"], pending: ["创建中", "text-amber-300"], failed: ["失败", "text-rose-300"] };
+
+function ImagesPage({ servers, templates, summary, reload }) {
+  const [data, setData] = useState(null); const [launch, setLaunch] = useState(null); const [pick, setPick] = useState(false); const [snapFor, setSnapFor] = useState(null); const [copy, setCopy] = useState(null);
+  const load = useCallback(() => api("/api/images").then(setData).catch(e => fail(e.message)), []);
+  const pending = data && data.images.some(i => i.state === "pending");
+  useEffect(() => { load(); const t = setInterval(load, pending ? 15000 : 60000); return () => clearInterval(t); }, [load, pending]);
+  const remove = async (img) => {
+    if (!await Confirm.ask({ title: "删除快照", message: `删除快照「${img.name}」？将同时删除其 EBS 快照，不可恢复。已用它创建的服务器不受影响。`, danger: true, okText: "删除", typeToConfirm: img.name })) return;
+    try { await del(`/api/images/${img.image_id}?region=${img.region}`); ok("已删除"); load(); } catch (e) { fail(e.message); }
+  };
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-sm text-slate-400">快照（AMI 镜像）包含系统盘全部内容：DCV、GPU 驱动、已安装软件。用标准镜像批量创建服务器，保证环境一致。</div>
+        {can("operator") && <Btn color="blue" onClick={() => setPick(true)}>从服务器创建快照</Btn>}
+      </div>
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2">名称</th>{multiRegion() && <th className="text-left px-3">区域</th>}<th className="text-left px-3">状态</th><th className="text-left px-3">来源服务器</th><th className="text-left px-3">大小</th><th className="text-left px-3">创建时间</th><th className="text-right px-3">操作</th></tr></thead>
+          <tbody>
+            {data && data.images.map(img => <tr key={img.image_id} className="border-b border-slate-800">
+              <td className="px-3 py-2.5"><div className="font-medium">{img.name}</div><div className="text-[11px] text-slate-500 font-mono">{img.image_id}{img.description && !img.description.startsWith("DCV snapshot") ? " · " + img.description : ""}</div></td>
+              {multiRegion() && <td className="px-3 whitespace-nowrap">{regionShort(img.region)}{img.copied_from && <div className="text-[11px] text-slate-500">复制自 {regionShort(img.copied_from.split("/")[0])}</div>}</td>}
+              <td className={`px-3 ${(IMG_ST[img.state] || ["", ""])[1]}`}>{(IMG_ST[img.state] || [img.state])[0]}</td>
+              <td className="px-3 text-slate-300">{img.source_name || img.source_instance || "—"}</td><td className="px-3 text-slate-400">{img.size_gb} GiB</td>
+              <td className="px-3 text-slate-400 whitespace-nowrap">{fmtT(img.created)}</td>
+              <td className="px-3 text-right whitespace-nowrap space-x-1.5">{can("admin") && <><Btn small color="green" disabled={img.state !== "available"} onClick={() => setLaunch(img)}>创建服务器</Btn>
+                {multiRegion() && <Btn small color="ghost" disabled={img.state !== "available"} onClick={() => setCopy(img)}>复制到区域</Btn>}<Btn small color="ghost" onClick={() => remove(img)}>删除</Btn></>}</td>
+            </tr>)}
+            {data && data.images.length === 0 && <tr><td colSpan="6" className="text-center text-slate-500 py-10">暂无快照。把配置好软件的服务器做成快照后，就可以一次创建多台相同的服务器。</td></tr>}
+            {!data && <tr><td colSpan="6" className="text-center text-slate-500 py-10">加载中…</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {pick && <Modal title="选择要做快照的服务器" onClose={() => setPick(false)}>
+        <div className="space-y-1 max-h-96 overflow-y-auto scrollbar">{servers.map(s => <button key={s.instance_id} onClick={() => { setPick(false); setSnapFor(s); }} className="w-full text-left flex items-center justify-between px-3 py-2 rounded-lg hover:bg-slate-800">
+          <span>{s.name || s.instance_id}<span className="text-xs text-slate-500 ml-2">{multiRegion() ? regionShort(s.region) + " · " : ""}{s.group}</span></span><StateDot state={s.state} /></button>)}</div></Modal>}
+      {copy && <CopyImageDialog img={copy} images={data ? data.images : []} onClose={() => setCopy(null)} onDone={() => { setCopy(null); load(); }} />}
+      {snapFor && <SnapshotDialog inst={snapFor} onClose={() => { setSnapFor(null); setTimeout(load, 2000); }} />}
+      {launch && data && <LaunchDialog img={launch} types={data.allowed_types} templates={templates} summary={summary} onClose={() => setLaunch(null)} onDone={() => { setLaunch(null); setTimeout(reload, 3000); }} />}
+    </div>
+  );
+}
+
+function CopyImageDialog({ img, images, onClose, onDone }) {
+  const targets = ((CFG && CFG.regions) || []).filter(r => r !== img.region);
+  const has = (r) => images.some(x => x.region === r && (x.copied_from === `${img.region}/${img.image_id}` || (x.name === img.name && x.state !== "failed")));
+  const [sel, setSel] = useState(targets.filter(r => !has(r))); const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true);
+    try { const r = await post(`/api/images/${img.image_id}/copy`, { regions: sel });
+      ok(`已开始复制到 ${r.copies.map(c => regionShort(c.region)).join("、")}，约 10–40 分钟完成（状态显示为「创建中」）`); if (r.errors.length) warn(r.errors.join("；")); onDone(); }
+    catch (e) { fail(e.message); setBusy(false); }
+  };
+  return <Modal title={`复制快照到其他区域 · ${img.name}`} onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="blue" onClick={go} disabled={busy || !sel.length}>开始复制</Btn></>}>
+    <div className="text-sm text-slate-400 mb-3">快照是区域级资源。复制到其他区域后，可在那里用同一套系统环境（DCV、驱动、软件）批量创建服务器。源区域：{regionName(img.region)}，大小 {img.size_gb} GiB。</div>
+    <div className="space-y-1.5">{targets.map(r => <label key={r} className={`flex items-center justify-between px-3 py-2 rounded-lg border cursor-pointer ${sel.includes(r) ? "border-sky-500 bg-sky-500/10" : "border-slate-700"}`}>
+      <span><input type="checkbox" className="mr-2" checked={sel.includes(r)} onChange={() => setSel(toggle(sel, r))} />{regionName(r)}</span>
+      {has(r) && <span className="text-xs text-amber-300">该区域已有同名快照</span>}</label>)}</div>
+    <div className="text-xs text-slate-500 mt-3">跨区域复制按数据传输量计费（约 $0.02/GB），目标区域另行按快照存储计费。</div>
+  </Modal>;
+}
+
+function LaunchDialog({ img, types, templates, summary, onClose, onDone }) {
+  const std = templates.find(t => t.key === "standard-office");
+  const [type, setType] = useState(types[0] ? types[0].type : ""); const [name, setName] = useState((img.source_name || "dcv") + "-new"); const [count, setCount] = useState(1);
+  const [group, setGroup] = useState(""); const [assignee, setAssignee] = useState(""); const [dept, setDept] = useState("");
+  const [tid, setTid] = useState(std ? std.id : ""); const [busy, setBusy] = useState(false);
+  const [shares, setShares] = useState([]); const [shareIds, setShareIds] = useState([]);
+  const [zone, setZone] = useState("auto"); const [cap, setCap] = useState(null);
+  useEffect(() => { api(capUrl(img.region)).then(setCap).catch(() => {}); }, []);
+  const capOf = (az) => cap && cap.cells.find(c => c.az === az && c.type === type);
+  const zonesOk = cap ? cap.zones.filter(z => z.subnet && (capOf(z.az) || {}).offered) : [];
+  useEffect(() => { api("/api/shares").then(d => setShares(d.shares)).catch(() => {}); }, []);
+  const max = (CFG && CFG.max_launch_count) || 20; const t = types.find(x => x.type === type);
+  const names = count > 1 ? Array.from({ length: Math.min(count, 3) }, (_, n) => `${name}-${String(n + 1).padStart(2, "0")}`).join("、") + (count > 3 ? ` … ${name}-${String(count).padStart(2, "0")}` : "") : name;
+  const go = async () => {
+    if (!await Confirm.ask({ title: "创建服务器", message: `将在 ${regionName(img.region)} 从快照「${img.name}」创建 ${count} 台 ${type}（${t ? `${t.cpu} vCPU / ${gib(t.memory_mib)}` : ""}），创建后立即开机并开始计费。${priceOf(img.region, type) != null ? `\n\n费用：${hourly(priceOf(img.region, type))} × ${count} 台 = $${(priceOf(img.region, type) * count).toFixed(2)}/小时；按每天 8 小时×22 天约 ${usd(priceOf(img.region, type) * count * WORK_HOURS, 0)}/月（不含磁盘等）。` : ""}\n\n名称：${names}`, okText: `创建 ${count} 台`, typeToConfirm: count >= 5 ? String(count) : null })) return;
+    setBusy(true);
+    try { const r = await post(`/api/images/${img.image_id}/launch`, { instance_type: type, name, count, group, assignee: count === 1 ? assignee : "", department: dept, template_id: tid ? Number(tid) : null, share_ids: shareIds, zone }); ok(`已创建 ${r.instance_ids.length} 台服务器（${Object.entries(r.zones).map(([z, n]) => `${z} ${n} 台`).join("，")}），约 5–10 分钟后可连接`); if (r.warning) warn(r.warning); onDone(); }
+    catch (e) { fail(e.message); setBusy(false); }
+  };
+  return (
+    <Modal title={`从快照创建服务器 · ${img.name}${multiRegion() ? " · " + regionShort(img.region) : ""}`} onClose={onClose} width="max-w-2xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="green" onClick={go} disabled={busy || !name.trim()}>{busy ? "创建中…" : `创建 ${count} 台`}</Btn></>}>
+      <div className="grid grid-cols-3 gap-2 mb-4">{types.map(x => <button key={x.type} onClick={() => setType(x.type)} className={`text-left rounded-lg border p-2.5 ${type === x.type ? "border-emerald-500 bg-emerald-500/10" : "border-slate-700 hover:border-slate-500"}`}>
+        <div className="font-medium text-sm">{x.type}</div><div className="text-xs text-slate-400 mt-0.5">{x.cpu} vCPU · {gib(x.memory_mib)} 内存</div><div className="text-xs text-slate-500">显存 {gib(x.gpu_memory_mib)}</div>
+        <div className="mt-1"><PriceTag region={img.region} type={x.type} /></div></button>)}</div>
+      <datalist id="dl-g2">{summary && summary.groups.map(g => <option key={g} value={g} />)}</datalist><datalist id="dl-d2">{summary && summary.departments.map(g => <option key={g} value={g} />)}</datalist>
+      <div className="grid grid-cols-3 gap-3">
+        <div className="col-span-2"><Field label="名称" hint={count > 1 ? "将生成：" + names : ""}><Input value={name} onChange={e => setName(e.target.value)} className="w-full" /></Field></div>
+        <Field label={`数量（最多 ${max}）`}><Input type="number" min="1" max={max} value={count} onChange={e => setCount(Math.max(1, Math.min(max, Number(e.target.value) || 1)))} className="w-full" /></Field>
+        <Field label="分组"><Input list="dl-g2" value={group} onChange={e => setGroup(e.target.value)} className="w-full" /></Field>
+        <Field label="部门"><Input list="dl-d2" value={dept} onChange={e => setDept(e.target.value)} className="w-full" /></Field>
+        <Field label="使用人"><Input value={assignee} onChange={e => setAssignee(e.target.value)} disabled={count > 1} placeholder={count > 1 ? "批量创建后逐台设置" : ""} className="w-full" /></Field>
+        <div className="col-span-3"><Field label="可用区" hint="自动：选择当前容量最好的可用区，容量不足时自动换下一个；均衡分布：多台轮流放入各可用区，单个可用区缺货只影响一部分服务器">
+          <div className="flex flex-wrap gap-2">
+            {[["auto", "自动选择"], ...(count > 1 ? [["spread", "多可用区均衡分布"]] : []), ...zonesOk.map(z => [z.az, z.az])].map(([k, l]) => { const c = capOf(k);
+              return <button key={k} onClick={() => setZone(k)} className={`text-xs px-2.5 py-1.5 rounded-lg border ${zone === k ? "border-emerald-500 bg-emerald-500/10" : "border-slate-700 hover:border-slate-500"}`}>
+                {l}{c && <span className={`ml-1.5 ${CAP[c.status][1]}`}>· {CAP[c.status][0]}</span>}</button>; })}
+            {!cap && <span className="text-xs text-slate-500">读取容量中…</span>}
+          </div></Field></div>
+        <div className="col-span-3"><Field label="开机后自动应用权限模板" hint="服务器首次开机、SSM 上线后自动下发，同时写入开机会话配置，避免出现 No sessions available。">
+          <Select value={tid} onChange={e => setTid(e.target.value)} className="w-full"><option value="">不自动应用（保持快照中的配置）</option>{templates.map(t => <option key={t.id} value={t.id}>{t.name}（{t.level}）</option>)}</Select></Field></div>
+        {shares.length > 0 && <div className="col-span-3"><Field label="共享盘" hint="开机后自动挂载。「全部服务器」范围的共享盘无需勾选，会自动挂载。">
+          <div className="flex flex-wrap gap-2">{shares.map(s => s.scope === "all"
+            ? <span key={s.id} className="text-xs px-2 py-1 rounded border border-slate-700 text-slate-400">{s.drive}: {s.name}（自动）</span>
+            : <label key={s.id} className={`text-xs px-2 py-1 rounded border cursor-pointer ${shareIds.includes(s.id) ? "border-sky-500 bg-sky-500/15" : "border-slate-700"}`}>
+                <input type="checkbox" className="mr-1.5 align-middle" checked={shareIds.includes(s.id)} onChange={e => setShareIds(e.target.checked ? [...shareIds, s.id] : shareIds.filter(x => x !== s.id))} />{s.drive}: {s.name}</label>)}</div></Field></div>}
+      </div>
+    </Modal>
+  );
+}
+
+// ============================================================
+// 操作审计
+// ============================================================
+const AUDIT_ZH = { start: "开机", stop: "关机", reboot: "重启", permissions: "DCV 权限", snapshot: "快照", launch: "创建服务器", reset_password: "重置 DCV 密码", tags: "分组/使用人", rename: "重命名", login: "登录", user: "用户管理", template: "权限模板", schedule: "定时任务", share: "共享盘", capacity: "容量实测", change_type: "更改机型", migrate: "迁移可用区", host_agent: "主机组件", setup: "系统设置", terminate: "删除服务器" };
+function AuditPage() {
+  const [q, setQ] = useState(""); const [action, setAction] = useState(""); const [op, setOp] = useState(""); const [days, setDays] = useState(30); const [page, setPage] = useState(0);
+  const [data, setData] = useState(null); const size = 100;
+  const load = useCallback(() => { const p = new URLSearchParams({ q, action, operator: op, days, limit: size, offset: page * size }); api("/api/audit?" + p).then(setData).catch(e => fail(e.message)); }, [q, action, op, days, page]);
+  useEffect(() => { const t = setTimeout(load, 300); return () => clearTimeout(t); }, [load]);
+  const exportAll = async () => {
+    const p = new URLSearchParams({ q, action, operator: op, days, limit: 500, offset: 0 }); const d = await api("/api/audit?" + p);
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const rows = d.items.map(x => [fmtT(x.ts), x.operator, AUDIT_ZH[x.action] || x.action, x.instance_name || (x.instance_id === "-" ? "" : x.instance_id), x.instance_id === "-" ? "" : x.instance_id, x.detail].map(esc).join(","));
+    const blob = new Blob(["\ufeff" + ["时间,操作人,类型,对象,实例ID,详情", ...rows].join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `DCV操作审计_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+  };
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <Input placeholder="搜索实例 ID 或详情" value={q} onChange={e => { setQ(e.target.value); setPage(0); }} className="w-64" />
+        <Select value={action} onChange={e => { setAction(e.target.value); setPage(0); }}><option value="">全部类型</option>{Object.entries(AUDIT_ZH).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>
+        <Select value={op} onChange={e => { setOp(e.target.value); setPage(0); }}><option value="">全部操作人</option>{data && data.operators.map(o => <option key={o}>{o}</option>)}</Select>
+        <Select value={days} onChange={e => { setDays(Number(e.target.value)); setPage(0); }}>{[1, 7, 30, 90, 365].map(d => <option key={d} value={d}>近 {d} 天</option>)}</Select>
+        <div className="ml-auto flex items-center gap-2"><span className="text-xs text-slate-500">共 {data ? data.total : "…"} 条</span><Btn small color="ghost" onClick={exportAll}>导出 CSV</Btn></div>
+      </div>
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2 w-44">时间</th><th className="text-left px-3 w-28">操作人</th><th className="text-left px-3 w-28">类型</th><th className="text-left px-3 w-52">对象</th><th className="text-left px-3">详情</th></tr></thead>
+          <tbody>{data && data.items.map(x => <tr key={x.id} className="border-b border-slate-800">
+            <td className="px-3 py-2 text-slate-400 whitespace-nowrap">{fmtT(x.ts)}</td><td className="px-3">{x.operator}</td><td className="px-3 text-slate-300">{AUDIT_ZH[x.action] || x.action}</td>
+            <td className="px-3">{x.instance_id === "-" ? <span className="text-slate-600">平台</span> : <><div className="truncate">{x.instance_name || x.instance_id}</div>{x.instance_name && <div className="text-[11px] text-slate-500 font-mono">{x.instance_id}</div>}</>}</td>
+            <td className="px-3 text-slate-400">{x.detail}</td></tr>)}
+            {data && data.items.length === 0 && <tr><td colSpan="5" className="text-center text-slate-500 py-10">没有记录</td></tr>}</tbody>
+        </table>
+      </div>
+      {data && data.total > size && <div className="flex justify-center gap-2 mt-3"><Btn small disabled={page === 0} onClick={() => setPage(page - 1)}>上一页</Btn><span className="text-sm text-slate-400 px-2 py-1">{page + 1} / {Math.ceil(data.total / size)}</span><Btn small disabled={(page + 1) * size >= data.total} onClick={() => setPage(page + 1)}>下一页</Btn></div>}
+      <div className="text-xs text-slate-500 mt-3">这里是管理平台内的操作记录。AWS 控制台或 CLI 的直接操作见各服务器「运行历史」（来自 CloudTrail）。</div>
+    </div>
+  );
+}
+
+// ============================================================
+// 用户与角色
+// ============================================================
+const ROLE_DESC = { admin: "全部权限：用户与角色、权限模板、定时任务、从快照创建服务器、删除快照", operator: "日常运维：开关机、巡检、应用模板与自定义权限、分组与使用人、创建快照、重置 DCV 密码", viewer: "只读：查看服务器、任务、运行历史与审计" };
+function UsersPage() {
+  const [users, setUsers] = useState(null); const [f, setF] = useState({ username: "", password: "", email: "", role: "operator" }); const [busy, setBusy] = useState(false); const [pwFor, setPwFor] = useState(null);
+  const load = useCallback(() => api("/api/users").then(d => setUsers(d.users)).catch(e => fail(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  const create = async () => { if (!f.username || !f.password) { fail("请填写用户名和初始密码"); return; } setBusy(true);
+    try { await post("/api/users", f); ok(`已创建用户 ${f.username}（${ROLE_ZH[f.role]}），初始密码：${f.password}`); setF({ username: "", password: "", email: "", role: f.role }); load(); } catch (e) { fail(e.message); } finally { setBusy(false); } };
+  const setRole = async (u, role) => { if (!await Confirm.ask({ title: "修改角色", message: `将 ${u.username} 的角色从「${ROLE_ZH[u.role]}」改为「${ROLE_ZH[role]}」？\n用户重新登录后生效。`, okText: "确认" })) { load(); return; }
+    try { await put(`/api/users/${encodeURIComponent(u.username)}/role`, { role }); ok("角色已修改"); load(); } catch (e) { fail(e.message); load(); } };
+  const toggle = async (u) => { try { await post(`/api/users/${encodeURIComponent(u.username)}/enabled`, { enabled: !u.enabled }); ok(u.enabled ? "已禁用" : "已启用"); load(); } catch (e) { fail(e.message); } };
+  const remove = async (u) => { if (!await Confirm.ask({ title: "删除用户", message: `删除用户 ${u.username}？该用户的历史操作记录会保留。`, danger: true, okText: "删除", typeToConfirm: u.username })) return;
+    try { await del(`/api/users/${encodeURIComponent(u.username)}`); ok("已删除"); load(); } catch (e) { fail(e.message); } };
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-3">{["admin", "operator", "viewer"].map(r => <div key={r} className="bg-slate-900 border border-slate-700 rounded-xl p-3"><div className="font-medium text-sm">{ROLE_ZH[r]}</div><div className="text-xs text-slate-400 mt-1">{ROLE_DESC[r]}</div></div>)}</div>
+      <div className="bg-slate-900 border border-slate-700 rounded-xl p-4 flex flex-wrap items-end gap-3">
+        <Field label="用户名"><Input value={f.username} onChange={e => setF({ ...f, username: e.target.value })} className="w-40" /></Field>
+        <Field label="初始密码"><div className="flex gap-1"><Input value={f.password} onChange={e => setF({ ...f, password: e.target.value })} className="w-44 font-mono" /><Btn small onClick={() => setF({ ...f, password: genPassword(14) })}>生成</Btn></div></Field>
+        <Field label="邮箱（可选）"><Input value={f.email} onChange={e => setF({ ...f, email: e.target.value })} className="w-52" /></Field>
+        <Field label="角色"><Select value={f.role} onChange={e => setF({ ...f, role: e.target.value })}>{["admin", "operator", "viewer"].map(r => <option key={r} value={r}>{ROLE_ZH[r]}</option>)}</Select></Field>
+        <Btn color="green" onClick={create} disabled={busy}>新建用户</Btn>
+      </div>
+      <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
+        <table className="w-full text-sm"><thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2">用户名</th><th className="text-left px-3">角色</th><th className="text-left px-3">邮箱</th><th className="text-left px-3">状态</th><th className="text-left px-3">创建时间</th><th className="text-right px-3">操作</th></tr></thead>
+          <tbody>{users && users.map(u => { const me = ME && u.username === ME.username; return <tr key={u.username} className="border-b border-slate-800">
+            <td className="px-3 py-2.5 font-medium">{u.username}{me && <span className="text-[10px] text-sky-300 ml-1.5">（我）</span>}</td>
+            <td className="px-3"><Select value={u.role} disabled={me} onChange={e => setRole(u, e.target.value)}>{["admin", "operator", "viewer"].map(r => <option key={r} value={r}>{ROLE_ZH[r]}</option>)}</Select></td>
+            <td className="px-3 text-slate-400">{u.email || "—"}</td>
+            <td className="px-3">{u.enabled ? <span className="text-emerald-300 text-xs">启用</span> : <span className="text-slate-500 text-xs">已禁用</span>}</td>
+            <td className="px-3 text-slate-400 whitespace-nowrap">{fmtT(u.created)}</td>
+            <td className="px-3 text-right whitespace-nowrap space-x-1.5"><Btn small color="ghost" onClick={() => setPwFor(u)}>重置密码</Btn>{!me && <><Btn small color="ghost" onClick={() => toggle(u)}>{u.enabled ? "禁用" : "启用"}</Btn><Btn small color="ghost" onClick={() => remove(u)}>删除</Btn></>}</td>
+          </tr>; })}</tbody></table>
+      </div>
+      {pwFor && <UserPasswordDialog user={pwFor} onClose={() => setPwFor(null)} />}
+    </div>
+  );
+}
+
+function UserPasswordDialog({ user, onClose }) {
+  const [pw, setPw] = useState(genPassword(14)); const [busy, setBusy] = useState(false);
+  const go = async () => { setBusy(true); try { await post(`/api/users/${encodeURIComponent(user.username)}/password`, { password: pw }); ok(`已重置 ${user.username} 的密码为：${pw}`); onClose(); } catch (e) { fail(e.message); setBusy(false); } };
+  return <Modal title={`重置平台登录密码 · ${user.username}`} onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="amber" onClick={go} disabled={busy || !pw}>确认重置</Btn></>}>
+    <Field label="新密码" hint="至少 8 位，含大写、小写字母和数字"><div className="flex gap-2"><Input value={pw} onChange={e => setPw(e.target.value)} className="flex-1 font-mono" /><Btn small onClick={() => setPw(genPassword(14))}>重新生成</Btn><Btn small onClick={() => { navigator.clipboard.writeText(pw); ok("已复制"); }}>复制</Btn></div></Field>
+  </Modal>;
+}
+
+function MyPasswordDialog({ onClose }) {
+  const [a, setA] = useState(""); const [b, setB] = useState(""); const [c, setC] = useState(""); const [busy, setBusy] = useState(false);
+  const go = async () => { if (b !== c) { fail("两次输入的新密码不一致"); return; } setBusy(true); try { await post("/api/me/password", { old_password: a, new_password: b }); ok("密码已修改，下次登录请使用新密码"); onClose(); } catch (e) { fail(e.message); setBusy(false); } };
+  return <Modal title="修改我的登录密码" onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="amber" onClick={go} disabled={busy || !a || !b}>确认修改</Btn></>}>
+    <div className="space-y-3"><Field label="原密码"><Input type="password" value={a} onChange={e => setA(e.target.value)} className="w-full" /></Field>
+      <Field label="新密码" hint="至少 8 位，含大写、小写字母和数字"><Input type="password" value={b} onChange={e => setB(e.target.value)} className="w-full" /></Field>
+      <Field label="确认新密码"><Input type="password" value={c} onChange={e => setC(e.target.value)} className="w-full" /></Field></div>
+  </Modal>;
+}
+
+// ============================================================
+// 登录与应用外壳
+// ============================================================
+function Login({ onOk }) {
+  const [u, setU] = useState(""); const [p, setP] = useState(""); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  const [chal, setChal] = useState(null); const [n1, setN1] = useState(""); const [n2, setN2] = useState("");
+  const done = (d) => { TOKEN = d.token; ME = { username: d.username, role: d.role }; localStorage.setItem("dcv_token", TOKEN); localStorage.setItem("dcv_me", JSON.stringify(ME)); onOk(); };
+  const postJson = async (path, body) => { const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json(); if (!r.ok) throw new Error(d.detail || "操作失败"); return d; };
+  const go = async (e) => {
+    e.preventDefault(); setBusy(true); setErr("");
+    try { const d = await postJson("/api/login", { username: u, password: p }); if (d.challenge === "NEW_PASSWORD_REQUIRED") setChal(d); else done(d); }
+    catch (e2) { setErr(e2.message); } finally { setBusy(false); }
+  };
+  const setNew = async (e) => {
+    e.preventDefault(); setErr("");
+    if (n1 !== n2) { setErr("两次输入的新密码不一致"); return; }
+    if (n1 === p) { setErr("新密码不能与临时密码相同"); return; }
+    setBusy(true);
+    try { done(await postJson("/api/login/new-password", { username: chal.username, session: chal.session, new_password: n1 })); }
+    catch (e2) { setErr(e2.message); } finally { setBusy(false); }
+  };
+  return <div className="min-h-screen flex items-center justify-center">
+    {!chal ? <form onSubmit={go} className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-96 space-y-3">
+      <div><h1 className="text-xl font-bold">DCV 企业管理平台</h1><p className="text-slate-400 text-sm mt-1">统一管理 GPU 云桌面服务器</p></div>
+      <Input autoFocus placeholder="用户名" value={u} onChange={e => setU(e.target.value)} className="w-full" />
+      <Input type="password" placeholder="密码" value={p} onChange={e => setP(e.target.value)} className="w-full" />
+      {err && <div className="text-rose-400 text-sm">{err}</div>}
+      <button type="submit" disabled={busy} className="w-full bg-sky-600 hover:bg-sky-500 rounded-lg py-2 font-medium disabled:opacity-50">{busy ? "登录中…" : "登录"}</button>
+    </form> : <form onSubmit={setNew} className="bg-slate-900 border border-slate-700 rounded-2xl p-8 w-96 space-y-3">
+      <div><h1 className="text-xl font-bold">设置新密码</h1><p className="text-slate-400 text-sm mt-1">首次登录需要把临时密码改为你自己的密码。至少 12 位，包含大小写字母、数字和符号。</p></div>
+      <Input autoFocus type="password" placeholder="新密码" value={n1} onChange={e => setN1(e.target.value)} className="w-full" />
+      <Input type="password" placeholder="再次输入新密码" value={n2} onChange={e => setN2(e.target.value)} className="w-full" />
+      {err && <div className="text-rose-400 text-sm">{err}</div>}
+      <button type="submit" disabled={busy || !n1} className="w-full bg-sky-600 hover:bg-sky-500 rounded-lg py-2 font-medium disabled:opacity-50">{busy ? "提交中…" : "设置并登录"}</button>
+      <button type="button" className="w-full text-xs text-slate-400 hover:text-white" onClick={() => { setChal(null); setErr(""); setP(""); }}>返回登录</button>
+    </form>}
+  </div>;
+}
+
+const NAV = [["servers", "服务器", "viewer"], ["templates", "权限模板", "viewer"], ["jobs", "任务中心", "viewer"], ["schedules", "定时任务", "viewer"], ["images", "快照与镜像", "viewer"], ["shares", "共享存储", "viewer"], ["capacity", "容量检测", "viewer"], ["audit", "操作审计", "viewer"], ["users", "用户与角色", "admin"], ["settings", "系统设置", "admin"]];
+
+function Shell() {
+  const [page, setPage] = useState(() => (NAV.find(n => n[0] === location.hash.slice(1)) || NAV[0])[0]);
+  const [data, setData] = useState(null); const [features, setFeatures] = useState(null); const [templates, setTemplates] = useState([]); const [cfg, setCfg] = useState(null);
+  const [, setPriceTs] = useState(0);
+  const [drawer, setDrawer] = useState(null); const [runningJobs, setRunningJobs] = useState(0); const [openJob, setOpenJob] = useState(null); const [pw, setPw] = useState(false); const [, setMe] = useState(ME);
+  const prevRunning = useRef(0);
+  useEffect(() => { location.hash = page; }, [page]);
+  const load = useCallback(async () => { try { setData(await api("/api/instances")); } catch (e) { fail(e.message); } }, []);
+  const hardReload = async () => { await post("/api/instances/refresh").catch(() => {}); await load(); };
+  const loadTpl = useCallback(() => api("/api/templates").then(d => setTemplates(d.templates)).catch(e => fail(e.message)), []);
+  useEffect(() => {
+    api("/api/me").then(m => { ME = m; localStorage.setItem("dcv_me", JSON.stringify(m)); setMe(m); }).catch(() => {});
+    api("/api/features").then(setFeatures).catch(e => fail(e.message)); api("/api/config").then(c => { CFG = c; setCfg(c); }).catch(() => {});
+    const loadPrices = () => api("/api/prices").then(d => { PRICES = d.prices || {}; setPriceTs(d.fetched_at || Date.now()); }).catch(() => {});
+    loadPrices(); setTimeout(loadPrices, 8000);
+    loadTpl(); load();
+  }, []);
+  useEffect(() => { const t = setInterval(() => { if (!document.hidden) load(); }, 15000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    const poll = () => api("/api/jobs?limit=30").then(d => { const n = d.jobs.filter(j => j.status === "running").length; if (prevRunning.current > n) load(); prevRunning.current = n; setRunningJobs(n); }).catch(() => {});
+    poll(); const t = setInterval(poll, 4000); return () => clearInterval(t);
+  }, [load]);
+  const servers = data ? data.instances : [];
+  const drawerInst = drawer && servers.find(i => i.instance_id === drawer);
+  const title = (NAV.find(n => n[0] === page) || [])[1];
+  if (!features) return <div className="min-h-screen flex items-center justify-center text-slate-500">加载中…</div>;
+  return (
+    <div className="flex min-h-screen">
+      <aside className="w-52 shrink-0 bg-slate-950 border-r border-slate-800 flex flex-col">
+        <div className="px-4 py-4 border-b border-slate-800"><div className="font-bold">DCV 管理平台</div><div className="text-[11px] text-slate-500 mt-0.5">{cfg ? `${cfg.regions && cfg.regions.length > 1 ? `${cfg.regions.length} 个区域` : cfg.region} · ${servers.length} 台` : ""}</div></div>
+        <nav className="flex-1 py-2">{NAV.filter(n => can(n[2])).map(([k, z]) => <button key={k} onClick={() => setPage(k)} className={`w-full flex items-center justify-between px-4 py-2 text-sm ${page === k ? "bg-slate-800 text-white border-l-2 border-sky-500" : "text-slate-400 hover:text-slate-200 hover:bg-slate-900 border-l-2 border-transparent"}`}>
+          <span>{z}</span>
+          {k === "jobs" && runningJobs > 0 && <span className="text-[10px] bg-sky-600 rounded-full px-1.5">{runningJobs}</span>}
+          {k === "servers" && data && data.summary.critical > 0 && <span className="text-[10px] bg-rose-600 rounded-full px-1.5">{data.summary.critical}</span>}
+          {k === "templates" && data && data.summary.outdated > 0 && <span className="text-[10px] bg-amber-600 rounded-full px-1.5">{data.summary.outdated}</span>}
+        </button>)}</nav>
+        <div className="p-3 border-t border-slate-800 text-sm">
+          <div className="truncate">{ME && ME.username}</div><div className="text-[11px] text-slate-500">{ME && ROLE_ZH[ME.role]}</div>
+          <div className="flex gap-3 mt-2 text-xs">{cfg && cfg.cognito && <button className="text-slate-400 hover:text-white" onClick={() => setPw(true)}>修改密码</button>}<button className="text-slate-400 hover:text-white" onClick={logout}>退出</button></div>
+        </div>
+      </aside>
+      <main className="flex-1 min-w-0">
+        <div className="flex items-center justify-between px-6 py-3.5 border-b border-slate-800">
+          <h1 className="text-lg font-semibold">{title}</h1>
+          <div className="flex items-center gap-2">
+            {runningJobs > 0 && <button className="text-xs text-sky-300 hover:underline" onClick={() => setPage("jobs")}>{runningJobs} 个任务执行中</button>}
+            <Btn small color="ghost" onClick={() => { hardReload(); loadTpl(); }}>刷新</Btn>
+          </div>
+        </div>
+        <div className="p-6">
+          {cfg && !cfg.setup_saved && can("admin") && page !== "settings" && <div className="mb-4 flex items-center justify-between bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-2.5 text-sm text-amber-200">
+            <span>平台尚未完成初始化设置，当前使用默认配置。建议在「系统设置」中确认区域、网络、安全组与权限。</span><Btn small color="amber" onClick={() => setPage("settings")}>去设置</Btn></div>}
+          {page === "servers" && <ServersPage data={data} reload={load} features={features} templates={templates} openServer={setDrawer} />}
+          {page === "templates" && <TemplatesPage templates={templates} features={features} servers={servers} reloadTpl={loadTpl} reload={load} />}
+          {page === "jobs" && <JobsPage reload={load} openJob={openJob} setOpenJob={setOpenJob} />}
+          {page === "schedules" && <SchedulesPage servers={servers} />}
+          {page === "images" && <ImagesPage servers={servers} templates={templates} summary={data && data.summary} reload={load} />}
+          {page === "shares" && <SharesPage servers={servers} reload={load} />}
+          {page === "capacity" && <CapacityPage servers={servers} />}
+          {page === "audit" && <AuditPage />}
+          {page === "users" && can("admin") && <UsersPage />}
+          {page === "settings" && can("admin") && <SettingsPage servers={servers} />}
+        </div>
+      </main>
+      {drawerInst && <ServerDrawer inst={drawerInst} features={features} templates={templates} reload={load} summary={data.summary} onClose={() => setDrawer(null)} />}
+      {pw && <MyPasswordDialog onClose={() => setPw(false)} />}
+    </div>
+  );
+}
+
+// ============================================================
+// 系统设置与初始化向导
+// ============================================================
+const CHK = { ok: ["正常", "text-emerald-300", "●"], warn: ["注意", "text-amber-300", "●"], error: ["异常", "text-rose-300", "●"], pending: ["待创建", "text-sky-300", "○"] };
+
+function CheckList({ checks }) {
+  return <div className="divide-y divide-slate-800">{checks.map(x => <div key={x.key} className="flex gap-3 py-2 text-sm">
+    <span className={`w-16 shrink-0 ${CHK[x.status][1]}`}>{CHK[x.status][2]} {CHK[x.status][0]}</span>
+    <span className="w-36 shrink-0 text-slate-300">{x.title}</span><span className="text-slate-400 text-xs leading-5">{x.detail}</span></div>)}</div>;
+}
+
+function SettingsPage({ servers = [] }) {
+  const [d, setD] = useState(null); const [wiz, setWiz] = useState(null); const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => { setBusy(true); try { setD(await api("/api/setup/status")); } catch (e) { fail(e.message); } finally { setBusy(false); } }, []);
+  useEffect(() => { load(); }, [load]);
+  const restartThenReload = () => { ok("设置已保存，平台正在重启…"); setTimeout(async function again() { try { await api("/api/config"); setTimeout(() => location.reload(), 500); } catch { setTimeout(again, 1500); } }, 4000); };
+  const remove = async (r) => {
+    const n = r.servers;
+    if (!await Confirm.ask({ title: "移除管理区域", danger: true, okText: "移除", typeToConfirm: r.region,
+      message: `从平台移除 ${regionName(r.region)}？\n\n· 只修改平台设置，不删除该区域的任何 AWS 资源\n· 该区域 ${n} 台服务器、快照和定时任务不再在平台中显示，但定时任务和托管开机函数照常运行\n· 以后可以随时重新添加` })) return;
+    try { await post("/api/setup/regions/remove", { region: r.region }); restartThenReload(); } catch (e) { fail(e.message); }
+  };
+  const setHome = async (r) => {
+    if (!await Confirm.ask({ title: "设为主区域", okText: "确认", message: `把 ${regionName(r)} 设为主区域？\n\n主区域是平台默认显示的区域，新建共享盘存储桶也默认放在主区域。不影响其他区域的服务器。` })) return;
+    try { await post("/api/setup/regions/home", { region: r }); restartThenReload(); } catch (e) { fail(e.message); }
+  };
+  if (!d) return <div className="text-slate-500 text-center py-16">正在检查各区域配置…</div>;
+  const g = d.global; const all = d.regions.flatMap(r => r.checks); const bad = all.filter(x => x.status === "error").length; const warnN = all.filter(x => x.status === "warn").length;
+  return <div className="space-y-4 max-w-6xl">
+    <div className="flex items-start justify-between gap-4">
+      <div className="text-sm text-slate-400">平台管理的 AWS 区域，以及每个区域的网络、安全组、密钥和托管组件。实例角色、机型和策略对所有区域生效。修改后平台自动重启。
+        <div className="text-xs text-slate-500 mt-1">当前身份：{d.identity.arn}（账号 {d.identity.account}）</div></div>
+      <div className="flex gap-2 shrink-0"><Btn small color="ghost" onClick={load} disabled={busy}>{busy ? "检查中…" : "重新检查"}</Btn>
+        <Btn color="blue" onClick={() => setWiz({ mode: "add" })}>新增区域</Btn></div>
+    </div>
+    <div className={`rounded-xl border px-4 py-3 text-sm ${bad ? "bg-rose-500/10 border-rose-500/40 text-rose-200" : warnN ? "bg-amber-500/10 border-amber-500/30 text-amber-200" : "bg-emerald-500/10 border-emerald-500/30 text-emerald-200"}`}>
+      管理 {d.regions.length} 个区域。{bad ? `${bad} 项异常，需要处理后相关功能才能正常使用。` : warnN ? `配置可用，有 ${warnN} 项建议优化。` : "全部检查通过。"}
+      {!g.saved && " 当前为默认配置（环境变量），尚未在控制台保存。"}{g.saved_at && <span className="text-xs opacity-70 ml-2">上次保存：{fmtT(g.saved_at)} · {g.saved_by}</span>}</div>
+    <div className="bg-slate-900 border border-slate-700 rounded-xl p-4"><div className="text-xs font-medium text-slate-400 mb-1">全局设置（所有区域）</div>
+      <div className="grid grid-cols-2 gap-x-6">
+        <div><KV k="主区域" v={regionName(d.home_region)} /><KV k="实例配置文件 / 角色" v={`${g.instance_profile} / ${g.instance_role}`} /><KV k="允许的机型" v={g.allowed_types.join("、")} /></div>
+        <div><KV k="系统盘" v={`${g.volume_gb} GB`} /><KV k="定时任务时区" v={g.scheduler_tz} /><KV k="巡检间隔 / 闲置阈值" v={`${g.inspect_interval_min} 分钟 / ${g.idle_hours} 小时`} /></div>
+      </div></div>
+    {d.regions.map(r => { const p = r.plan; const e = r.checks.filter(x => x.status === "error").length; const w = r.checks.filter(x => x.status === "warn").length; const home = r.region === d.home_region;
+      return <div key={r.region} className="bg-slate-900 border border-slate-700 rounded-xl">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+          <div className="flex items-center gap-2"><span className="font-semibold">{regionName(r.region)}</span>{home && <span className="text-[10px] bg-sky-600 rounded px-1.5 py-0.5">主区域</span>}
+            <span className={`text-xs ${e ? "text-rose-300" : w ? "text-amber-300" : "text-emerald-300"}`}>{e ? `${e} 项异常` : w ? `${w} 项建议` : "正常"}</span></div>
+          <div className="flex gap-2">{!home && <Btn small color="ghost" onClick={() => setHome(r.region)}>设为主区域</Btn>}
+            <Btn small onClick={() => setWiz({ mode: "edit", region: r.region, plan: p })}>修改</Btn>
+            {d.regions.length > 1 && <Btn small color="ghost" onClick={() => remove({ ...r, servers: servers.filter(x => x.region === r.region).length })}>移除</Btn>}</div>
+        </div>
+        <div className="grid grid-cols-2 gap-4 p-4">
+          <div><KV k="VPC" v={p.vpc_id || "—"} mono /><KV k="子网" v={(p.subnet_ids || []).join(", ") || "—"} mono /><KV k="安全组" v={p.security_group_id || "—"} mono /><KV k="密钥对" v={p.key_name || "—"} /></div>
+          <div><CheckList checks={r.checks} /></div>
+        </div>
+      </div>; })}
+    {wiz && <SetupWizard mode={wiz.mode} current={{ ...g, ...(wiz.plan || { region: "", vpc_id: "", subnet_ids: [], security_group_id: "", key_name: "" }) }}
+      managed={d.regions.map(r => r.region)} home={d.home_region} onClose={() => setWiz(null)} />}
+  </div>;
+}
+
+const ALL_TYPES = () => [...new Set([...((CFG && CFG.candidate_types) || []), ...((CFG && CFG.allowed_types) || [])])];
+
+// 向导中的通用小组件（定义在组件外，避免输入时重新挂载导致失去焦点）
+const Mode = ({ value, onChange, items }) => <div className="flex gap-2 mb-3">{items.map(([v, l]) => <button key={v} onClick={() => onChange(v)} className={`px-3 py-1.5 rounded-lg border text-sm ${value === v ? "border-sky-500 bg-sky-500/10 text-white" : "border-slate-700 text-slate-300"}`}>{l}</button>)}</div>;
+const L = ({ t, children, hint }) => <label className="block mb-3"><div className="text-xs text-slate-400 mb-1">{t}</div>{children}{hint && <div className="text-[11px] text-slate-500 mt-1">{hint}</div>}</label>;
+const toggle = (arr, v) => arr.includes(v) ? arr.filter(x => x !== v) : [...arr, v];
+
+function SetupWizard({ current, onClose, mode = "edit", managed = [], home }) {
+  const adding = mode === "add";
+  const steps = ["区域", "网络", "安全组", "主机权限", "机型与策略", "确认并执行"];
+  const [step, setStep] = useState(0);
+  const [region, setRegion] = useState(current.region || ""); const [regions, setRegions] = useState(null); const [makeHome, setMakeHome] = useState(false);
+  const [net, setNet] = useState({ mode: "existing", vpc_id: current.vpc_id || "", subnet_ids: current.subnet_ids || [], cidr: "10.80.0.0/16", name: "dcv-vpc", azs: [] });
+  const [netInfo, setNetInfo] = useState(null); const [vpcInfo, setVpcInfo] = useState(null);
+  const [sg, setSg] = useState({ mode: current.security_group_id ? "existing" : "create", id: current.security_group_id, name: "dcv-servers", cidrs: "0.0.0.0/0",
+    rdp: false, rdpCidrs: "", egress: "minimal" });
+  const [acc, setAcc] = useState({ profile_mode: current.instance_profile ? "existing" : "create", profile: current.instance_profile, role_name: "dcv-instance-role", key_name: current.key_name });
+  const [accInfo, setAccInfo] = useState(null); const [newKey, setNewKey] = useState("dcv-key");
+  const [types, setTypes] = useState(current.allowed_types); const [fb, setFb] = useState(current.default_fallback || {});
+  const [opt, setOpt] = useState({ scheduler_tz: current.scheduler_tz, inspect_interval_min: current.inspect_interval_min, idle_hours: current.idle_hours, volume_gb: current.volume_gb, deploy: true });
+  const [pre, setPre] = useState(null); const [task, setTask] = useState(null); const [busy, setBusy] = useState(false);
+  const changedRegion = false;
+
+  useEffect(() => { api("/api/setup/regions").then(d => setRegions(d.regions)).catch(e => fail(e.message)); }, []);
+  const [, setPriceTick] = useState(0);
+  useEffect(() => { if (!region || PRICES[region]) return;  // 新增区域时单独查询该区域单价
+    api(`/api/prices?region=${encodeURIComponent(region)}`).then(d => { PRICES = { ...PRICES, ...(d.prices || {}) }; setPriceTick(x => x + 1); }).catch(() => {}); }, [region]);
+  useEffect(() => { if (!region) return; setNetInfo(null); setAccInfo(null);
+    api(`/api/setup/network?region=${region}`).then(d => { setNetInfo(d); if (region !== current.region) setNet(n => ({ ...n, vpc_id: "", subnet_ids: [] }));
+      setNet(n => ({ ...n, azs: d.zones.filter(z => z.types.some(t => t.startsWith("g6f"))).map(z => z.az) }));
+      if (adding) { const def = d.vpcs.find(v => v.default); setNet(n => ({ ...n, vpc_id: def ? def.id : "", subnet_ids: [], mode: d.vpcs.length ? "existing" : "create" })); setSg(x => ({ ...x, id: "" })); setAcc(x => ({ ...x, key_name: "" })); } }).catch(e => fail(e.message));
+    api(`/api/setup/access?region=${region}`).then(setAccInfo).catch(e => fail(e.message)); }, [region]);
+  useEffect(() => { setVpcInfo(null); if (net.mode === "existing" && net.vpc_id) api(`/api/setup/network?region=${region}&vpc_id=${net.vpc_id}`).then(setVpcInfo).catch(e => fail(e.message)); }, [region, net.vpc_id, net.mode]);
+  // 新建 VPC 时只能新建安全组；切回已有 VPC 时恢复为选择已有安全组
+  useEffect(() => { setSg(x => ({ ...x, mode: net.mode === "create" ? "create" : (x.id ? "existing" : x.mode) })); }, [net.mode]);
+  useEffect(() => { if (vpcInfo && sg.id && !vpcInfo.security_groups.some(g => g.id === sg.id)) setSg(x => ({ ...x, id: "" })); }, [vpcInfo]);
+
+  const offered = useMemo(() => { const r = regions && regions.find(x => x.region === region); return r ? r.types : {}; }, [regions, region]);
+  const plan = () => ({ region, network: net.mode === "create" ? { mode: "create", cidr: net.cidr, name: net.name, azs: net.azs } : { mode: "existing", vpc_id: net.vpc_id, subnet_ids: net.subnet_ids },
+    security_group: sg.mode === "create" ? { mode: "create", name: sg.name, cidrs: sg.cidrs.split(/[\s,，]+/).filter(Boolean), egress: sg.egress,
+      rdp_cidrs: sg.rdp ? sg.rdpCidrs.split(/[\s,，]+/).filter(Boolean) : [] } : { mode: "existing", id: sg.id },
+    access: acc.profile_mode === "create" ? { profile_mode: "create", role_name: acc.role_name, key_name: acc.key_name } : { profile_mode: "existing", profile: acc.profile, key_name: acc.key_name },
+    allowed_types: types, default_fallback: Object.fromEntries(types.map(t => [t, (fb[t] || []).filter(x => types.includes(x) && x !== t)])),
+    scheduler_tz: opt.scheduler_tz, inspect_interval_min: Number(opt.inspect_interval_min), idle_hours: Number(opt.idle_hours), volume_gb: Number(opt.volume_gb), deploy: opt.deploy,
+    home_region: makeHome ? region : null });
+  const stepOk = [!!region && (!adding || !managed.includes(region)), net.mode === "create" ? (net.azs.length > 0 && !!net.cidr) : (!!net.vpc_id && net.subnet_ids.length > 0),
+    sg.mode === "create" ? (!!sg.cidrs.trim() && (!sg.rdp || !!sg.rdpCidrs.trim())) : !!sg.id, (acc.profile_mode === "create" || !!acc.profile) && !!acc.key_name, types.length > 0, true];
+  const goNext = async () => { if (step === 4) { setPre(null); setStep(5); try { setPre(await post("/api/setup/check", plan())); } catch (e) { fail(e.message); } } else setStep(step + 1); };
+  const makeKey = async () => {
+    try { const r = await post("/api/setup/key", { region, name: newKey });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([r.private_key], { type: "application/x-pem-file" })); a.download = `${r.name}.pem`; a.click();
+      ok(`密钥对 ${r.name} 已创建，私钥已下载（平台不保存，请妥善保管）`); setAcc(x => ({ ...x, key_name: r.name }));
+      setAccInfo(await api(`/api/setup/access?region=${region}`)); } catch (e) { fail(e.message); }
+  };
+  const run = async () => {
+    const msg = `${adding ? "新增管理区域" : "更新区域"} ${regionName(region)}：\n· 网络：${net.mode === "create" ? `新建 VPC ${net.cidr}（${net.azs.length} 个可用区的公有子网）` : `使用 ${net.vpc_id}`}\n· 安全组：${sg.mode === "create" ? "新建，仅放行 DCV 端口" : `使用 ${sg.id}`}\n· 实例角色：${acc.profile_mode === "create" ? `新建 ${acc.role_name}` : acc.profile}\n${opt.deploy ? "· 部署/更新托管组件：定时任务角色与调度组、运行历史、托管开机函数\n" : ""}· 保存设置后平台自动重启（约 5 秒）` + `\n\n其他已管理区域（${managed.filter(r => r !== region).map(regionShort).join("、") || "无"}）不受影响。机型与策略为全局设置，对所有区域生效。`;
+    if (!await Confirm.ask({ title: adding ? "新增区域" : "更新区域设置", message: msg, okText: "开始执行" })) return;
+    setBusy(true);
+    try { const r = await post("/api/setup/apply", plan()); poll(r.task_id); } catch (e) { fail(e.message); setBusy(false); }
+  };
+  const poll = (id) => { const tick = async () => { try { const t = await api(`/api/setup/tasks/${id}`); setTask(t);
+      if (t.status === "running") setTimeout(tick, 1500); else if (t.status === "success") waitRestart(); else setBusy(false); } catch (e) { setTimeout(tick, 2000); } }; tick(); };
+  const waitRestart = () => { setTimeout(async function again() { try { await api("/api/config"); ok("设置已生效"); setTimeout(() => location.reload(), 800); } catch { setTimeout(again, 1500); } }, 4000); };
+
+
+  return <Modal title={`${adding ? "新增区域" : `区域设置 · ${regionShort(region)}`} · ${steps[step]}`} onClose={busy ? () => {} : onClose} width="max-w-4xl" footer={task ? <Btn onClick={onClose} disabled={busy}>关闭</Btn> : <>
+      <span className="mr-auto text-xs text-slate-500">第 {step + 1} / {steps.length} 步</span>
+      <Btn onClick={() => step ? setStep(step - 1) : onClose()}>{step ? "上一步" : "取消"}</Btn>
+      {step < 5 ? <Btn color="blue" onClick={goNext} disabled={!stepOk[step]}>下一步</Btn> : <Btn color="green" onClick={run} disabled={busy || !pre || pre.errors.length > 0}>执行</Btn>}</>}>
+    <div className="flex gap-1 mb-4">{steps.map((x, i) => <div key={x} className={`flex-1 text-center text-[11px] py-1 rounded ${i === step ? "bg-sky-600 text-white" : i < step ? "bg-slate-700 text-slate-200" : "bg-slate-800 text-slate-500"}`}>{i + 1}. {x}</div>)}</div>
+
+    {step === 0 && <div>
+      <div className="text-sm text-slate-400 mb-3">{adding ? "选择要新增管理的区域。建议选离用户最近、且至少两个可用区提供 g6f 的区域。已管理的区域不可再选。" : `正在修改 ${regionName(region)} 的设置。要管理其他区域请使用「新增区域」。`}</div>
+      {!regions ? <div className="text-slate-500 text-sm py-6 text-center">正在查询各区域的 GPU 机型…</div> :
+        <div className="grid grid-cols-3 gap-2 max-h-96 overflow-auto scrollbar pr-1">{regions.map(r => { const g6f = (r.types["g6f.xlarge"] || []).length; const g4 = (r.types["g4dn.xlarge"] || []).length;
+          const locked = adding ? r.managed : r.region !== region;
+          return <button key={r.region} disabled={locked} onClick={() => setRegion(r.region)} className={`text-left rounded-lg border p-2.5 ${region === r.region ? "border-sky-500 bg-sky-500/10" : "border-slate-700 hover:border-slate-500"} ${locked ? "opacity-40 cursor-not-allowed" : ""}`}>
+            <div className="text-sm font-medium">{regionShort(r.region)} <span className="text-[11px] text-slate-500 font-normal">{r.region}</span>{r.managed && <span className="text-[10px] text-sky-300 ml-1.5">{r.current ? "主区域" : "已管理"}</span>}</div>
+            <div className={`text-[11px] mt-0.5 ${g6f ? "text-emerald-300" : "text-slate-500"}`}>{r.error ? "无法查询（可能未启用）" : g6f ? `g6f：${g6f} 个可用区` : "不提供 g6f"}{g4 ? ` · g4dn：${g4}` : ""}</div></button>; })}</div>}
+      {region && region !== home && <label className="flex items-center gap-2 text-sm mt-3"><input type="checkbox" checked={makeHome} onChange={e => setMakeHome(e.target.checked)} />设为主区域（平台默认显示的区域，新建共享盘存储桶默认放在这里）</label>}
+    </div>}
+
+    {step === 1 && <div>
+      <Mode value={net.mode} onChange={v => setNet({ ...net, mode: v })} items={[["existing", "使用已有 VPC"], ["create", "新建 VPC"]]} />
+      {!netInfo ? <div className="text-slate-500 text-sm">加载中…</div> : net.mode === "existing" ? <>
+        <L t="VPC"><Select className="w-full" value={net.vpc_id} onChange={e => setNet({ ...net, vpc_id: e.target.value, subnet_ids: [] })}><option value="">请选择</option>
+          {netInfo.vpcs.map(v => <option key={v.id} value={v.id}>{v.name || "(无名称)"} · {v.id} · {v.cidr}{v.default ? " · 默认 VPC" : ""}</option>)}</Select></L>
+        {net.vpc_id && <><div className="text-xs text-slate-400 mb-1">子网（每个可用区选一个；只能选公有子网，服务器需要公网访问 SSM 和用户连接）</div>
+          {!vpcInfo ? <div className="text-slate-500 text-sm">加载中…</div> : <table className="w-full text-sm"><thead className="text-[11px] text-slate-500"><tr><th></th><th className="text-left py-1">子网</th><th className="text-left">可用区</th><th className="text-left">网段</th><th className="text-left">剩余 IP</th><th className="text-left">类型</th><th className="text-left">提供的机型</th></tr></thead>
+            <tbody>{vpcInfo.subnets.map(x => { const on = net.subnet_ids.includes(x.id); const dupAz = !on && net.subnet_ids.some(id => (vpcInfo.subnets.find(y => y.id === id) || {}).az === x.az);
+              return <tr key={x.id} className={`border-t border-slate-800 ${!x.public ? "opacity-50" : ""}`}>
+                <td className="py-1.5 pr-2"><input type="checkbox" disabled={!x.public || dupAz} checked={on} onChange={() => setNet({ ...net, subnet_ids: toggle(net.subnet_ids, x.id) })} /></td>
+                <td><div className="font-mono text-xs">{x.id}</div><div className="text-[11px] text-slate-500">{x.name}</div></td><td>{x.az}</td><td className="text-xs">{x.cidr}</td><td>{x.free_ips}</td>
+                <td className={x.public ? "text-emerald-300" : "text-slate-500"}>{x.public ? "公有" : "私有"}</td>
+                <td className="text-[11px]">{x.types.filter(t => t.startsWith("g6f")).length ? <span className="text-emerald-300">g6f</span> : <span className="text-slate-500">无 g6f</span>}{x.types.filter(t => !t.startsWith("g6f")).length > 0 && <span className="text-slate-400"> · {x.types.filter(t => !t.startsWith("g6f")).join("、")}</span>}</td></tr>; })}</tbody></table>}</>}
+      </> : <>
+        <div className="grid grid-cols-2 gap-3"><L t="名称"><Input className="w-full" value={net.name} onChange={e => setNet({ ...net, name: e.target.value })} /></L>
+          <L t="VPC 网段" hint="不要与公司内网或其他 VPC 重叠（以后若需打通专线/VPN）"><Input className="w-full" value={net.cidr} onChange={e => setNet({ ...net, cidr: e.target.value })} /></L></div>
+        <div className="text-xs text-slate-400 mb-1.5">可用区（每个可用区创建一个公有子网、共用一个互联网网关）</div>
+        <div className="flex flex-wrap gap-2">{netInfo.zones.map(z => <label key={z.az} className={`px-3 py-2 rounded-lg border text-sm cursor-pointer ${net.azs.includes(z.az) ? "border-sky-500 bg-sky-500/10" : "border-slate-700"}`}>
+          <input type="checkbox" className="mr-2" checked={net.azs.includes(z.az)} onChange={() => setNet({ ...net, azs: toggle(net.azs, z.az) })} />{z.az}
+          <div className={`text-[11px] ${z.types.some(t => t.startsWith("g6f")) ? "text-emerald-300" : "text-slate-500"}`}>{z.types.length ? z.types.join("、") : "不提供所选机型"}</div></label>)}</div>
+      </>}
+    </div>}
+
+    {step === 2 && <div>
+      <Mode value={sg.mode} onChange={v => setSg({ ...sg, mode: v })} items={net.mode === "create" ? [["create", "新建安全组"]] : [["existing", "使用已有安全组"], ["create", "新建安全组"]]} />
+      {sg.mode === "existing" ? (!vpcInfo ? <div className="text-slate-500 text-sm">加载中…</div> :
+        <div className="space-y-1.5 max-h-80 overflow-auto scrollbar">{vpcInfo.security_groups.map(g => <label key={g.id} className={`flex items-start gap-2 px-3 py-2 rounded-lg border cursor-pointer ${sg.id === g.id ? "border-sky-500 bg-sky-500/10" : "border-slate-700"}`}>
+          <input type="radio" className="mt-1" checked={sg.id === g.id} onChange={() => setSg({ ...sg, id: g.id })} />
+          <div className="text-sm"><span className="font-medium">{g.name}</span> <span className="font-mono text-xs text-slate-500">{g.id}</span>
+            <div className={`text-[11px] ${g.dcv_tcp.length ? (g.open_world ? "text-amber-300" : "text-emerald-300") : "text-rose-300"}`}>{g.dcv_tcp.length ? `DCV ${CFG ? CFG.dcv_port : 8443}/TCP 来源：${g.dcv_tcp.join(", ")}${g.dcv_udp.length ? "；UDP 已放行" : "；UDP 未放行"}${g.open_world ? "（对全互联网开放）" : ""}` : "未放行 DCV 端口，不能使用"}</div></div></label>)}</div>) : <>
+        <L t="名称"><Input className="w-64" value={sg.name} onChange={e => setSg({ ...sg, name: e.target.value })} /></L>
+        <L t="允许连接 DCV 的来源网段（每行或逗号分隔）" hint="建议填写公司办公网出口 IP（例如 203.0.113.10/32）。">
+          <textarea className="w-full h-16 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-sm font-mono outline-none focus:border-sky-500" value={sg.cidrs} onChange={e => setSg({ ...sg, cidrs: e.target.value })} /></L>
+        {/0\.0\.0\.0\/0/.test(sg.cidrs) && <div className="text-xs text-amber-300 -mt-2 mb-3">0.0.0.0/0 表示任何人都能访问 DCV 登录页（仍需 Windows 账号密码），企业环境建议限制来源。</div>}
+        <label className="flex items-center gap-2 text-sm mb-2"><input type="checkbox" checked={sg.rdp} onChange={e => setSg({ ...sg, rdp: e.target.checked })} />开放 RDP 3389（仅维护时使用，日常运维通过 SSM，默认不开放）</label>
+        {sg.rdp && <L t="RDP 来源网段（不能为 0.0.0.0/0）"><Input className="w-full font-mono" placeholder="例如 203.0.113.10/32" value={sg.rdpCidrs} onChange={e => setSg({ ...sg, rdpCidrs: e.target.value })} /></L>}
+        <div className="text-xs text-slate-400 mt-3 mb-1.5">出站规则</div>
+        <div className="flex gap-2 mb-3">{[["minimal", "按平台功能最小放行（推荐）"], ["all", "放行全部出站"]].map(([v, l]) => <button key={v} onClick={() => setSg({ ...sg, egress: v })}
+          className={`px-3 py-1.5 rounded-lg border text-sm ${sg.egress === v ? "border-sky-500 bg-sky-500/10 text-white" : "border-slate-700 text-slate-300"}`}>{l}</button>)}</div>
+        {sg.egress === "all" && <div className="text-xs text-slate-500 mb-2">服务器上的业务软件需要访问其他端口（例如许可证服务器、数据库）时选择此项。</div>}
+        <div className="text-xs text-slate-400 mb-1">将要创建的规则</div>
+        <table className="w-full text-xs border border-slate-700 rounded-lg overflow-hidden"><thead className="bg-slate-800/60 text-slate-400"><tr><th className="text-left px-2 py-1.5">方向</th><th className="text-left px-2">协议 / 端口</th><th className="text-left px-2">来源 / 目标</th><th className="text-left px-2">用途</th></tr></thead>
+          <tbody>
+            {[["tcp", "DCV 连接（TCP）"], ["udp", "DCV 连接（QUIC / UDP，画面更流畅）"]].map(([pr, u]) => <tr key={pr} className="border-t border-slate-800"><td className="px-2 py-1.5">入站</td><td className="px-2 font-mono">{pr.toUpperCase()} {CFG ? CFG.dcv_port : 8443}</td><td className="px-2 font-mono">{sg.cidrs.split(/[\s,，]+/).filter(Boolean).join(", ") || "—"}</td><td className="px-2 text-slate-400">{u}</td></tr>)}
+            {sg.rdp && <tr className="border-t border-slate-800"><td className="px-2 py-1.5">入站</td><td className="px-2 font-mono">TCP 3389</td><td className="px-2 font-mono">{sg.rdpCidrs || "—"}</td><td className="px-2 text-slate-400">RDP 维护</td></tr>}
+            {sg.egress === "minimal" ? ((netInfo && netInfo.sg_template) ? netInfo.sg_template.egress_minimal : []).map(r => <tr key={r.port} className="border-t border-slate-800"><td className="px-2 py-1.5">出站</td><td className="px-2 font-mono">{r.proto.toUpperCase()} {r.port}</td><td className="px-2 font-mono">{r.cidrs.join(", ")}</td><td className="px-2 text-slate-400">{r.purpose}</td></tr>)
+              : <tr className="border-t border-slate-800"><td className="px-2 py-1.5">出站</td><td className="px-2 font-mono">全部</td><td className="px-2 font-mono">0.0.0.0/0</td><td className="px-2 text-slate-400">不限制</td></tr>}
+          </tbody></table>
+        <div className="text-[11px] text-slate-500 mt-1.5">安全组有状态：入站连接的回包自动放行；VPC DNS 与实例元数据不受安全组限制。</div>
+      </>}
+    </div>}
+
+    {step === 3 && <div>
+      <div className="text-xs text-slate-400 mb-1.5">实例角色（服务器通过它接受 SSM 远程管理、访问共享盘）</div>
+      <Mode value={acc.profile_mode} onChange={v => setAcc({ ...acc, profile_mode: v })} items={[["existing", "使用已有"], ["create", "新建"]]} />
+      {acc.profile_mode === "existing" ? (!accInfo ? <div className="text-slate-500 text-sm">加载中…</div> :
+        <Select className="w-full mb-4" value={acc.profile} onChange={e => setAcc({ ...acc, profile: e.target.value })}><option value="">请选择</option>
+          {accInfo.profiles.map(p => <option key={p.name} value={p.name}>{p.name} → {p.role || "无角色"}{p.ssm ? "（有 SSM 权限）" : "（缺少 SSM 权限）"}</option>)}</Select>) :
+        <L t="角色名称" hint="创建同名角色与实例配置文件，附加 AmazonSSMManagedInstanceCore；共享盘权限由平台按需追加。"><Input className="w-64" value={acc.role_name} onChange={e => setAcc({ ...acc, role_name: e.target.value })} /></L>}
+      <div className="text-xs text-slate-400 mb-1.5 mt-2">密钥对（用于解密 Windows 管理员初始密码；平台日常运维不需要）</div>
+      {!accInfo ? null : <div className="flex flex-wrap items-center gap-2">
+        <Select value={acc.key_name} onChange={e => setAcc({ ...acc, key_name: e.target.value })}><option value="">请选择</option>{accInfo.keys.map(k => <option key={k.name}>{k.name}</option>)}</Select>
+        <span className="text-xs text-slate-500">或新建：</span><Input className="w-40" value={newKey} onChange={e => setNewKey(e.target.value)} /><Btn small onClick={makeKey}>新建并下载私钥</Btn></div>}
+      {acc.key_name && !(accInfo && accInfo.keys.some(k => k.name === acc.key_name)) && <div className="text-xs text-rose-300 mt-1">{region} 中不存在密钥对 {acc.key_name}</div>}
+    </div>}
+
+    {step === 4 && <div className="grid grid-cols-2 gap-5">
+      <div><div className="text-xs text-slate-400 mb-1.5">允许使用的机型（创建、改机型、备选机型只能在这些中选择）</div>
+        <div className="space-y-1">{ALL_TYPES().map(t => { const zs = offered[t] || []; return <label key={t} className={`flex items-center gap-2 text-sm px-2 py-1 rounded ${zs.length ? "" : "opacity-40"}`}>
+          <input type="checkbox" disabled={!zs.length && !types.includes(t)} checked={types.includes(t)} onChange={() => setTypes(toggle(types, t))} /><span className="w-28">{t}</span>
+          <span className="text-[11px] text-slate-500 w-20">{zs.length ? `${zs.length} 个可用区` : "本区域不提供"}</span>{zs.length > 0 && <PriceTag region={region} type={t} compact />}</label>; })}</div>
+        <div className="text-[11px] text-slate-500 mt-1">单价为 Windows 按需价格，不含磁盘、公网 IP 与流量。</div></div>
+      <div><div className="text-xs text-slate-400 mb-1.5">默认备选机型顺序（容量不足时依次尝试，可在每台服务器单独覆盖）</div>
+        {types.map(t => { const bad = (fb[t] || []).filter(x => x === t || !types.includes(x));
+          return <L key={t} t={t} hint={bad.length ? <span className="text-amber-300">{bad.map(x => x === t ? `${x} 与原机型相同` : `${x} 未在左侧勾选`).join("；")}，保存时会被忽略</span> : ""}>
+            <Input className="w-full" placeholder="例如 g4dn.xlarge, g5.xlarge；留空表示不换机型" value={(fb[t] || []).join(", ")}
+              onChange={e => setFb({ ...fb, [t]: e.target.value.split(/[\s,，]+/).filter(Boolean) })} /></L>; })}
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <L t="系统盘（GB）"><Input type="number" className="w-full" value={opt.volume_gb} onChange={e => setOpt({ ...opt, volume_gb: e.target.value })} /></L>
+          <L t="定时任务时区"><Input className="w-full" value={opt.scheduler_tz} onChange={e => setOpt({ ...opt, scheduler_tz: e.target.value })} /></L>
+          <L t="后台巡检间隔（分钟，0 关闭）"><Input type="number" className="w-full" value={opt.inspect_interval_min} onChange={e => setOpt({ ...opt, inspect_interval_min: e.target.value })} /></L>
+          <L t="闲置提醒（小时）"><Input type="number" className="w-full" value={opt.idle_hours} onChange={e => setOpt({ ...opt, idle_hours: e.target.value })} /></L></div>
+        <label className="flex items-start gap-2 text-sm mt-1"><input type="checkbox" className="mt-0.5" checked={opt.deploy} onChange={e => setOpt({ ...opt, deploy: e.target.checked })} />
+          <span>部署或更新托管组件<div className="text-[11px] text-slate-500">定时任务执行角色与调度组、运行历史（EventBridge → CloudWatch Logs）、托管开机函数与关机改回规则。均为按量计费的无服务器资源，日常费用可忽略。</div></span></label></div>
+    </div>}
+
+    {step === 5 && <div>
+      {!task && <>
+        <div className="text-sm text-slate-400 mb-2">预检结果（新建的资源在执行时创建）：</div>
+        {!pre ? <div className="text-slate-500 text-sm py-4">检查中…</div> : <>
+          {pre.errors.length > 0 && <div className="bg-rose-500/10 border border-rose-500/40 rounded-lg px-3 py-2 text-sm text-rose-200 mb-2">{pre.errors.join("；")}</div>}
+          <CheckList checks={pre.checks} /></>}
+      </>}
+      {task && <div>
+        <div className={`text-sm mb-2 ${task.status === "failed" ? "text-rose-300" : task.status === "success" ? "text-emerald-300" : "text-sky-300"}`}>
+          {task.status === "running" ? "执行中…" : task.status === "success" ? "完成，平台正在重启，稍后自动刷新…" : `失败：${task.error}`}</div>
+        <pre className="bg-slate-950 border border-slate-700 rounded-lg p-3 text-xs whitespace-pre-wrap max-h-96 overflow-auto scrollbar text-slate-300">{task.log.map(l => `${new Date(l.t * 1000).toLocaleTimeString("zh-CN", { hour12: false })}  ${l.msg}`).join("\n")}</pre>
+      </div>}
+    </div>}
+  </Modal>;
+}
+
+function App() {
+  const [authed, setAuthed] = useState(!!TOKEN && !!ME);
+  useEffect(() => { const h = () => setAuthed(false); window.addEventListener("dcv-logout", h); return () => window.removeEventListener("dcv-logout", h); }, []);
+  return <>{authed ? <Shell /> : <Login onOk={() => setAuthed(true)} />}<Toasts /><ConfirmHost /></>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

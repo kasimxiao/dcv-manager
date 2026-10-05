@@ -1,0 +1,10 @@
+__pycache__/
+.DS_Store
+.price-cache.json
+.pytest_cache/
+.venv/
+*.pem
+*.pyc
+data.db
+settings.json
+settings.json.tmp

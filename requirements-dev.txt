@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==8.3.4
+httpx==0.28.1  # FastAPI 接口测试
+diagrams==0.24.4  # 生成 docs/architecture.png（需 Graphviz）
