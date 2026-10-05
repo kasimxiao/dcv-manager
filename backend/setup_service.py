@@ -151,7 +151,8 @@ def access(region):
     for page in iam.get_paginator("list_instance_profiles").paginate():
         for p in page["InstanceProfiles"]:
             roles = [r["RoleName"] for r in p.get("Roles", [])]
-            profiles.append({"name": p["InstanceProfileName"], "role": roles[0] if roles else ""})
+            profiles.append({"name": p["InstanceProfileName"], "role": roles[0] if roles else "",
+                             "manageable": bool(roles) and roles[0].startswith("dcv-")})
 
     def ssm_ok(p):
         if not p["role"]:
@@ -273,6 +274,9 @@ def check(plan=None):
             add("profile", "实例角色", "error", f"实例配置文件 {p['instance_profile']} 没有关联角色")
         elif "AmazonSSMManagedInstanceCore" not in att:
             add("profile", "实例角色", "warn", f"角色 {roles[0]} 未附加 AmazonSSMManagedInstanceCore，平台可能无法远程管理主机")
+        elif not roles[0].startswith(MANAGED_ROLE_PREFIX):
+            add("profile", "实例角色", "error", f"角色 {roles[0]} 不以 {MANAGED_ROLE_PREFIX} 开头：平台的最小权限只能传递和修改 {MANAGED_ROLE_PREFIX}* 角色，"
+                "创建服务器、共享盘授权、DCV 授权都会失败。请在向导中新建实例角色，或改用 dcv- 开头的角色")
         else:
             st = "ok" if roles[0] == p["instance_role"] else "error"
             add("profile", "实例角色", st, f"{p['instance_profile']} → 角色 {roles[0]}（已有 SSM 托管权限）"
@@ -610,6 +614,8 @@ def dcv_license_ok(role, region):
 # ---------------- 执行向导 ----------------
 
 TASKS = {}
+# 平台角色的最小权限只允许管理以此开头的 IAM 角色、实例配置文件、函数与规则（见 deploy/platform.yaml）
+MANAGED_ROLE_PREFIX = "dcv-"
 
 
 def validate(req):
@@ -644,6 +650,8 @@ def validate(req):
         errs.append("请选择安全组")
     if acc.get("profile_mode") != "create" and not acc.get("profile"):
         errs.append("请选择实例配置文件")
+    if acc.get("profile_mode") == "create" and not (acc.get("role_name") or "dcv-instance-role").startswith(MANAGED_ROLE_PREFIX):
+        errs.append(f"实例角色名称必须以 {MANAGED_ROLE_PREFIX} 开头（平台的最小权限只能管理这类角色）")
     if not acc.get("key_name"):
         errs.append("请选择或新建密钥对")
     if not req.get("allowed_types"):

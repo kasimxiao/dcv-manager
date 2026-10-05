@@ -149,52 +149,169 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
+        # 最小权限：按平台功能逐项授权（与 deploy/platform-role-policy.json 一致，由 deploy/render_policy.py 生成）
+        # 约定：平台管理的 IAM 角色、函数、规则名称均以 dcv- 开头；DCV 服务器带标签 dcv=true
         - PolicyName: dcv-manager-platform
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: Ec2Management
+              # ---- EC2：只读（发现服务器、容量检测、资源选择）
+              - Sid: Ec2Read
                 Effect: Allow
-                Action: ec2:*
+                Action: [ec2:Describe*, ec2:GetSpotPlacementScores]
                 Resource: "*"
-              - Sid: SsmManagement
+              # ---- EC2：只能操作带 dcv=true 标签的服务器（电源、改机型、快照、删除、标签）
+              - Sid: Ec2ManageDcvInstances
                 Effect: Allow
                 Action:
-                  - ssm:SendCommand
-                  - ssm:GetCommandInvocation
-                  - ssm:ListCommandInvocations
-                  - ssm:ListCommands
-                  - ssm:CancelCommand
-                  - ssm:DescribeInstanceInformation
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - ec2:RebootInstances
+                  - ec2:TerminateInstances
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:CreateImage
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:AssociateAddress
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                Condition: { StringEquals: { aws:ResourceTag/dcv: "true" } }
+              # ---- EC2：新建服务器时必须带 dcv=true 标签
+              - Sid: Ec2RunDcvInstances
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                Condition: { StringEquals: { aws:RequestTag/dcv: "true" } }
+              - Sid: Ec2RunInstancesResources
+                Effect: Allow
+                Action: ec2:RunInstances
+                Resource:
+                  - arn:aws:ec2:*::image/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:image/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:volume/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:network-interface/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:subnet/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:key-pair/*
+              # ---- EC2：创建资源时同时打标签
+              - Sid: Ec2TagOnCreate
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction:
+                      - RunInstances
+                      - CreateImage
+                      - CopyImage
+                      - CreateVpc
+                      - CreateSubnet
+                      - CreateInternetGateway
+                      - CreateRouteTable
+                      - CreateSecurityGroup
+                      - CreateKeyPair
+                      - CreateCapacityReservation
+              # ---- 快照（AMI）：创建、跨区域复制、给快照打标签、删除平台快照
+              - Sid: Ec2Images
+                Effect: Allow
+                Action: [ec2:CreateImage, ec2:CopyImage, ec2:CreateTags]
+                Resource:
+                  - arn:aws:ec2:*::image/*
+                  - arn:aws:ec2:*::snapshot/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:image/*
+                  - !Sub arn:aws:ec2:*:${AWS::AccountId}:snapshot/*
+              - Sid: Ec2DeregisterDcvImages
+                Effect: Allow
+                Action: ec2:DeregisterImage
+                Resource: arn:aws:ec2:*::image/*
+                Condition: { StringEquals: { aws:ResourceTag/dcv-snapshot: "true" } }
+              - Sid: Ec2DeleteImageSnapshots
+                # 删除快照时同时删除其 EBS 快照；跨区域复制得到的 EBS 快照没有标签，无法按标签限定
+                Effect: Allow
+                Action: ec2:DeleteSnapshot
+                Resource: arn:aws:ec2:*::snapshot/*
+              # ---- 容量实测：创建并立即取消容量预留（只能取消平台创建的）
+              - Sid: Ec2CapacityProbe
+                Effect: Allow
+                Action: ec2:CreateCapacityReservation
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:capacity-reservation/*
+                Condition: { StringEquals: { aws:RequestTag/dcv:capacity-probe: "true" } }
+              - Sid: Ec2CapacityProbeCancel
+                Effect: Allow
+                Action: ec2:CancelCapacityReservation
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:capacity-reservation/*
+                Condition: { StringEquals: { aws:ResourceTag/dcv:capacity-probe: "true" } }
+              # ---- 迁移与删除时转移 / 解除弹性 IP
+              - Sid: Ec2ElasticIp
+                Effect: Allow
+                Action: [ec2:AssociateAddress, ec2:DisassociateAddress]
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:elastic-ip/*
+              # ---- 初始化向导：新建 DCV 网络、安全组、密钥对
+              - Sid: Ec2SetupNetwork
+                Effect: Allow
+                Action:
+                  - ec2:CreateVpc
+                  - ec2:CreateSubnet
+                  - ec2:CreateInternetGateway
+                  - ec2:AttachInternetGateway
+                  - ec2:CreateRouteTable
+                  - ec2:CreateRoute
+                  - ec2:AssociateRouteTable
+                  - ec2:ModifyVpcAttribute
+                  - ec2:ModifySubnetAttribute
+                  - ec2:CreateSecurityGroup
+                  - ec2:CreateKeyPair
+                Resource: "*"
+              - Sid: Ec2SetupSecurityGroupRules
+                # 只能修改向导新建的安全组（带 dcv:managed-by 标签）
+                Effect: Allow
+                Action: [ec2:AuthorizeSecurityGroupIngress, ec2:AuthorizeSecurityGroupEgress, ec2:RevokeSecurityGroupEgress]
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:security-group/*
+                Condition: { StringEquals: { aws:ResourceTag/dcv:managed-by: dcv-manager } }
+              # ---- SSM：只能对带 dcv=true 标签的服务器下发命令，且只能用 PowerShell 文档
+              - Sid: SsmSendCommandToDcv
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub arn:aws:ec2:*:${AWS::AccountId}:instance/*
+                Condition: { StringEquals: { ssm:resourceTag/dcv: "true" } }
+              - Sid: SsmSendCommandDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: arn:aws:ssm:*::document/AWS-RunPowerShellScript
+              - Sid: SsmRead
+                Effect: Allow
+                Action: [ssm:GetCommandInvocation, ssm:ListCommandInvocations, ssm:CancelCommand, ssm:DescribeInstanceInformation]
                 Resource: "*"
               - Sid: SsmPasswordTransit
+                # 重置 DCV 密码时的加密参数（使用 AWS 托管密钥 aws/ssm，无需额外 KMS 权限）
                 Effect: Allow
-                Action: [ssm:PutParameter, ssm:DeleteParameter, ssm:GetParameter]
+                Action: [ssm:PutParameter, ssm:DeleteParameter]
                 Resource: !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/dcv-manager/*
-              - Sid: KmsForSecureString
-                Effect: Allow
-                Action: [kms:Encrypt, kms:Decrypt, kms:GenerateDataKey]
-                Resource: "*"
-                Condition: { StringLike: { kms:ViaService: ssm.*.amazonaws.com } }
+              # ---- IAM：只读
               - Sid: IamRead
                 Effect: Allow
-                Action: [iam:Get*, iam:List*]
+                Action:
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:GetInstanceProfile
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListRoles
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListInstanceProfiles
+                  - iam:ListInstanceProfilesForRole
+                  - iam:ListPolicyVersions
                 Resource: "*"
+              # ---- IAM：只能管理 dcv- 开头的角色与实例配置文件（不能修改平台自身角色 dcvmgr-platform-*）
               - Sid: IamManageDcvRoles
                 Effect: Allow
                 Action:
                   - iam:CreateRole
-                  - iam:DeleteRole
                   - iam:TagRole
-                  - iam:UpdateAssumeRolePolicy
                   - iam:PutRolePolicy
-                  - iam:DeleteRolePolicy
                   - iam:CreateInstanceProfile
-                  - iam:DeleteInstanceProfile
                   - iam:TagInstanceProfile
                   - iam:AddRoleToInstanceProfile
-                  - iam:RemoveRoleFromInstanceProfile
-                  - iam:PassRole
                 Resource:
                   - !Sub arn:aws:iam::${AWS::AccountId}:role/dcv-*
                   - !Sub arn:aws:iam::${AWS::AccountId}:instance-profile/dcv-*
@@ -208,36 +325,57 @@ Resources:
                       - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
                       - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
                       - !Sub arn:aws:iam::${AWS::AccountId}:policy/dcv-manager/*
+              - Sid: IamPassDcvRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/dcv-*
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: [ec2.amazonaws.com, lambda.amazonaws.com, scheduler.amazonaws.com]
               - Sid: IamSharePolicies
                 Effect: Allow
-                Action: [iam:CreatePolicy, iam:DeletePolicy, iam:CreatePolicyVersion, iam:DeletePolicyVersion, iam:TagPolicy]
+                Action: [iam:CreatePolicy, iam:DeletePolicy, iam:CreatePolicyVersion, iam:DeletePolicyVersion]
                 Resource: !Sub arn:aws:iam::${AWS::AccountId}:policy/dcv-manager/*
+              # ---- 托管组件：函数 dcv-*、规则 dcv-*、调度组 dcv-manager
               - Sid: LambdaPowerFunction
                 Effect: Allow
-                Action: lambda:*
+                Action:
+                  - lambda:GetFunction
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:AddPermission
+                  - lambda:PutFunctionEventInvokeConfig
+                  - lambda:TagResource
                 Resource: !Sub arn:aws:lambda:*:${AWS::AccountId}:function:dcv-*
               - Sid: EventsRules
                 Effect: Allow
-                Action: events:*
+                Action: [events:PutRule, events:PutTargets, events:ListTargetsByRule, events:DescribeRule]
                 Resource: !Sub arn:aws:events:*:${AWS::AccountId}:rule/dcv-*
-              - Sid: Scheduler
+              - Sid: SchedulerSchedules
                 Effect: Allow
-                Action: scheduler:*
-                Resource: "*"
-              - Sid: Logs
+                Action: [scheduler:GetSchedule, scheduler:CreateSchedule, scheduler:UpdateSchedule, scheduler:DeleteSchedule]
+                Resource: !Sub arn:aws:scheduler:*:${AWS::AccountId}:schedule/dcv-manager/*
+              - Sid: SchedulerGroup
                 Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:DeleteLogGroup
-                  - logs:PutRetentionPolicy
-                  - logs:DescribeLogGroups
-                  - logs:FilterLogEvents
-                  - logs:GetLogEvents
-                  - logs:PutResourcePolicy
-                  - logs:DescribeResourcePolicies
-                  - logs:DeleteResourcePolicy
+                Action: [scheduler:GetScheduleGroup, scheduler:CreateScheduleGroup]
+                Resource: !Sub arn:aws:scheduler:*:${AWS::AccountId}:schedule-group/dcv-manager
+              - Sid: SchedulerList
+                Effect: Allow
+                Action: scheduler:ListSchedules
                 Resource: "*"
-              - Sid: ShareBuckets
+              # ---- 运行历史日志
+              - Sid: LogsStateHistory
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:PutRetentionPolicy, logs:FilterLogEvents]
+                Resource: !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/events/dcv-*
+              - Sid: LogsResourcePolicy
+                # 允许 EventBridge 写入运行历史日志组（日志资源策略只能按账号级授权）
+                Effect: Allow
+                Action: [logs:DescribeResourcePolicies, logs:PutResourcePolicy]
+                Resource: "*"
+              # ---- S3：共享盘存储桶（名称由用户指定）与部署代码包
+              - Sid: S3ShareBuckets
                 Effect: Allow
                 Action:
                   - s3:ListAllMyBuckets
@@ -248,22 +386,29 @@ Resources:
                   - s3:PutBucketVersioning
                   - s3:PutLifecycleConfiguration
                 Resource: "*"
-              - Sid: Artifact
+              - Sid: S3Artifact
                 Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub arn:aws:s3:::${ArtifactBucket}/dcv-manager/*
+              # ---- 只读服务：开机失败记录、机型单价、配额
               - Sid: ReadOnlyServices
                 Effect: Allow
-                Action:
-                  - cloudtrail:LookupEvents
-                  - pricing:GetProducts
-                  - servicequotas:GetServiceQuota
-                  - servicequotas:GetAWSDefaultServiceQuota
-                  - sts:GetCallerIdentity
+                Action: [cloudtrail:LookupEvents, pricing:GetProducts, servicequotas:GetServiceQuota, servicequotas:GetAWSDefaultServiceQuota]
                 Resource: "*"
-              - Sid: Cognito
+              # ---- 平台用户：只能操作本平台的用户池
+              - Sid: CognitoUserPool
                 Effect: Allow
-                Action: cognito-idp:*
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminDisableUser
+                  - cognito-idp:AdminEnableUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminRemoveUserFromGroup
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:ListUsers
+                  - cognito-idp:ListUsersInGroup
                 Resource: !GetAtt UserPool.Arn
       Tags: [{ Key: dcv:managed-by, Value: dcv-manager }]
 

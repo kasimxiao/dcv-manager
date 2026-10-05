@@ -6,6 +6,7 @@
 
 ## 目录
 1. [场景与需求](#1-场景与需求)
+   - [界面预览](#13-界面预览)
 2. [架构说明](#2-架构说明)
 3. [方案说明](#3-方案说明)
 4. [代码结构](#4-代码结构)
@@ -35,6 +36,23 @@
 | 可部署 | 一键部署到 AWS，支持新建或使用已有 VPC；部署后在控制台从零完成初始化 |
 
 允许的机型（可在系统设置中调整）：g6f.large、g6f.xlarge、g6f.2xlarge，以及作为备选的 g4dn.xlarge、g5.xlarge。
+
+### 1.3 界面预览
+
+**服务器列表与详情**：汇总卡片、筛选、批量操作；详情中有管理信息、规格与单价、备选机型、主机实时状态（CPU、内存、显存、DCV 会话、授权）。
+![服务器列表与详情](docs/screenshots/01-servers.png)
+
+**权限模板**：5 个内置企业模板，按风险等级区分，列出受限项；可一键应用到多台服务器，也可对比模板规则。
+![权限模板](docs/screenshots/02-templates.png)
+
+**定时任务**：由 AWS EventBridge Scheduler 托管执行。「上下班计划」一次创建开机和关机两个任务；开机时容量不足会自动换备选机型。
+![定时任务](docs/screenshots/03-schedules.png)
+
+**快照与镜像**：从标准快照批量创建服务器，可选机型（显示单价）、可用区策略，以及开机后自动应用的权限模板和共享盘。
+![快照与镜像](docs/screenshots/04-images.png)
+
+**共享存储**：把 S3 存储桶挂载为服务器上的盘符，可选只读或读写，可限定服务器；访问权限由 IAM 在 S3 侧强制执行。
+![共享存储](docs/screenshots/05-shares.png)
 
 ---
 
@@ -169,7 +187,7 @@ AWS 没有接口能直接查询某个可用区的剩余 GPU 容量。平台按�
 |------|------|
 | 入口 | 只能通过 CloudFront 的 HTTPS 访问；平台服务器没有公网 IP，安全组只放行 CloudFront 源站地址段 |
 | 身份 | Cognito：密码至少 12 位，需包含大小写字母、数字和符号；仅管理员可创建用户；首次登录强制改密；令牌有效期 8 小时 |
-| 平台权限 | 实例角色 `dcvmgr-platform-<区域>`：可以管理 `dcv-*` 角色、函数和规则，以及 `/dcv-manager/` 下的策略；只能附加 3 类指定策略；**不能修改自身权限**；不能读取其他 S3 数据 |
+| 平台权限 | 实例角色 `dcvmgr-platform-<区域>`，按功能逐项授权的最小权限（见 6.7）：只能操作带 `dcv=true` 标签的服务器；只能管理 `dcv-*` 角色、函数和规则，以及 `/dcv-manager/` 下的策略；**不能修改自身权限**；不能读取任何 S3 数据或密钥 |
 | 主机 | 会话用户是标准用户；默认不开放 RDP，运维全部通过 SSM；新建安全组按功能最小放行（见下表） |
 | 数据 | 平台磁盘加密；部署存储桶默认加密，禁止公开访问；共享盘存储桶开启版本控制，旧版本保留 30 天 |
 
@@ -220,11 +238,16 @@ dcv-manager/
 ├── deploy/                      # AWS 部署
 │   ├── platform.yaml            # CloudFormation 模板
 │   ├── deploy.sh                # 一键部署 / 更新
+│   ├── platform-role-policy.json # 平台角色最小权限策略（由 render_policy.py 从模板生成）
+│   ├── render_policy.py         # 导出 / 校验最小权限策略
 │   └── destroy.sh               # 删除平台（可选同时清理 DCV 资源）
 ├── provisioning/
 │   ├── dcv-bootstrap.ps1        # 从 Windows 基础镜像全新安装 DCV 主机的初始化脚本
 │   └── deploy_power_function.py # 命令行部署托管组件（与向导相同）
-├── tests/                       # 单元测试（108 项，不访问 AWS）
+├── docs/
+│   ├── architecture.py / .png   # AWS 架构图（diagrams 生成）
+│   └── screenshots/             # 界面截图
+├── tests/                       # 单元测试（111 项，不访问 AWS）
 ├── run.sh                       # 本地开发启动
 └── requirements.txt / requirements-dev.txt
 ```
@@ -415,6 +438,37 @@ DCV_ADMIN_PASSWORD='本地口令' ./run.sh        # 本地启动 http://127.0.0.
 | `DCV_INSPECT_INTERVAL_MIN` | 后台巡检间隔（分钟，0 为关闭） | `10` |
 | `DCV_IDLE_HOURS` | 闲置提醒时长（小时） | `2` |
 | `DCV_MAX_LAUNCH_COUNT` | 单次批量创建上限 | `20` |
+
+### 6.7 平台角色的最小权限
+平台服务器的实例角色只授予平台功能实际用到的权限：
+- 用 `deploy.sh` 部署时，权限已写在 `deploy/platform.yaml` 中。
+- 不用本仓库的 CloudFormation、自行创建角色时，使用独立的策略文件 `deploy/platform-role-policy.json`。替换其中的占位符后，作为内联策略附加到角色上，同时附加托管策略 `AmazonSSMManagedInstanceCore`：
+  - `${AWS::AccountId}`：AWS 账号 ID
+  - `${ArtifactBucket}`：部署存储桶名称
+  - `${UserPool.Arn}`：Cognito 用户池 ARN
+
+修改 `platform.yaml` 中的策略后，执行 `python deploy/render_policy.py` 重新生成 JSON。单元测试会检查两者是否一致。
+
+| 功能 | 授权范围 |
+|------|------|
+| 服务器管理（电源、改机型、快照、删除、标签） | 只能操作带 `dcv=true` 标签的实例；新建实例必须带该标签 |
+| 远程命令（权限下发、巡检、挂载、改密、显卡自检） | `ssm:SendCommand` 只能发给带 `dcv=true` 标签的实例，且只能使用 `AWS-RunPowerShellScript` 文档 |
+| 改密中转参数 | 只能写入和删除 `/dcv-manager/*` 参数（使用 AWS 托管密钥 aws/ssm，不需要 KMS 权限） |
+| 容量实测 | 只能创建带 `dcv:capacity-probe` 标签的容量预留，也只能取消这类预留 |
+| 快照 | 创建与跨区域复制；只能注销带 `dcv-snapshot=true` 标签的镜像 |
+| 初始化向导 | 新建 VPC、子网、网关、路由表、安全组、密钥对；只能修改向导新建（带 `dcv:managed-by` 标签）的安全组规则 |
+| IAM | 只能创建和修改 `dcv-*` 角色与实例配置文件；只能附加 `AmazonSSMManagedInstanceCore`、`AWSLambdaBasicExecutionRole`、`/dcv-manager/*` 三类策略；只能把 `dcv-*` 角色传递给 EC2、Lambda、Scheduler |
+| 托管组件 | 函数 `dcv-*`、事件规则 `dcv-*`、调度组 `dcv-manager`、日志组 `/aws/events/dcv-*` |
+| 共享盘 | 创建与配置存储桶（不能读写其中数据）；`/dcv-manager/*` 托管策略 |
+| 其他只读 | CloudTrail 事件查询、价格接口、配额查询；只能操作本平台的 Cognito 用户池 |
+
+> **注意**：因为 IAM 权限限定为 `dcv-*`，服务器的实例角色必须以 `dcv-` 开头（初始化向导新建的 `dcv-instance-role` 满足这一点）。向导会把不符合条件的已有角色置灰，检查项也会报错。
+
+已用 IAM 策略模拟器核对 28 组「应允许 / 应拒绝」操作，全部符合预期；并在最小权限下实际跑通了全部功能：
+- 查询类：12 个只读接口、系统设置检查。
+- 初始化：重跑初始化向导。
+- 服务器生命周期：容量实测、从快照创建服务器、开机后自动应用模板、巡检、重置 DCV 密码、关机、改机型、删除服务器。
+- 其他：定时任务创建与删除、备选机型、新建与删除共享盘（存储桶与 IAM 策略）、创建与删除快照、平台用户增删。
 
 ---
 

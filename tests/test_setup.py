@@ -145,3 +145,32 @@ def test_regions_query_all_candidate_types(monkeypatch):
     out = s.regions()
     assert set(config.CANDIDATE_TYPES) <= set(asked)
     assert set(out[0]["types"]) >= set(config.CANDIDATE_TYPES)
+
+
+def test_role_policy_json_in_sync_with_template():
+    """deploy/platform-role-policy.json 必须由模板生成且保持一致。"""
+    import subprocess
+    root = os.path.dirname(os.path.dirname(__file__))
+    r = subprocess.run([sys.executable, os.path.join(root, "deploy", "render_policy.py"), "--check"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr or r.stdout
+
+
+def test_role_policy_is_least_privilege():
+    import json as _j
+    root = os.path.dirname(os.path.dirname(__file__))
+    doc = _j.load(open(os.path.join(root, "deploy", "platform-role-policy.json"), encoding="utf-8"))
+    acts = [a for st in doc["Statement"] for a in (st["Action"] if isinstance(st["Action"], list) else [st["Action"]])]
+    assert not [a for a in acts if a.endswith(":*") or a == "*"], "不应有服务级通配权限"
+    by = {st["Sid"]: st for st in doc["Statement"]}
+    assert by["Ec2ManageDcvInstances"]["Condition"]["StringEquals"]["aws:ResourceTag/dcv"] == "true"
+    assert by["SsmSendCommandToDcv"]["Condition"]["StringEquals"]["ssm:resourceTag/dcv"] == "true"
+    assert all(r.endswith(("role/dcv-*", "instance-profile/dcv-*")) for r in by["IamManageDcvRoles"]["Resource"])
+    assert by["IamPassDcvRoles"]["Resource"].endswith("role/dcv-*")
+    assert len(_j.dumps(doc, separators=(",", ":"))) < 10240
+
+
+def test_new_role_name_must_have_prefix():
+    import setup_service as s
+    e = s.validate(plan(access={"profile_mode": "create", "role_name": "my-role", "key_name": "k"}))
+    assert any("dcv-" in x for x in e)
+    assert s.validate(plan(access={"profile_mode": "create", "role_name": "dcv-instance-role", "key_name": "k"})) == []
