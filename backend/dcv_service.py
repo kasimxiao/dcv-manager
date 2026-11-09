@@ -32,20 +32,25 @@ def build_perm_content(spec: dict) -> str:
 
 @aws_service.in_instance_region
 def _detect_owner(instance_id: str) -> str:
-    """探测 console 会话当前属主，优先使用；否则用元数据或默认值。"""
+    """探测会话属主：以主机实际属主为准，其次平台记录，最后默认值。
+
+    主机优先，是为了避免在平台外手工改过属主（例如交付前把 Administrator 换成标准用户
+    dcvuser）之后，下一次从界面应用模板又把属主改回平台记录里的旧值。
+    """
+    try:
+        res = aws_service.run_powershell(
+            instance_id,
+            [f'& "{DCV_EXE}" list-sessions 2>&1'],
+            timeout=30,
+        )
+        m = re.search(r"owner:(\S+)", res.get("stdout", ""))
+        if m and m.group(1) and m.group(1).upper() != "SYSTEM":
+            return m.group(1)
+    except Exception:  # noqa: BLE001  主机不可达时退回平台记录
+        pass
     meta = db.get_meta(instance_id)
     if meta and meta.get("owner"):
         return meta["owner"]
-    res = aws_service.run_powershell(
-        instance_id,
-        [f'& "{DCV_EXE}" list-sessions 2>&1'],
-        timeout=30,
-    )
-    m = re.search(r"owner:(\S+)", res.get("stdout", ""))
-    if m:
-        owner = m.group(1)
-        if owner and owner.upper() != "SYSTEM":
-            return owner
     return DCV_DEFAULT_OWNER
 
 

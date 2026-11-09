@@ -27,8 +27,9 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // ============================================================
 let TOKEN = localStorage.getItem("dcv_token") || "";
 let ME = JSON.parse(localStorage.getItem("dcv_me") || "null");
-const RANK = { viewer: 0, operator: 1, admin: 2 };
-const ROLE_ZH = { viewer: "只读", operator: "运维", admin: "管理员" };
+const RANK = { desktop: 0, viewer: 1, operator: 2, admin: 3 };
+const ROLE_ZH = { desktop: "桌面用户", viewer: "只读", operator: "运维", admin: "管理员" };
+const ROLES = ["admin", "operator", "viewer", "desktop"];
 const can = (r) => ME && RANK[ME.role] >= RANK[r];
 
 async function api(path, opts = {}) {
@@ -174,34 +175,68 @@ function ServerPicker({ servers, value, onChange, filter }) {
   );
 }
 
+// 说明图标：悬停或点击显示浮层（固定定位，不会被弹窗滚动区域裁剪）
+function InfoTip({ text, title }) {
+  const [pos, setPos] = useState(null); const ref = useRef(null);
+  if (!text) return null;
+  const show = () => { const r = ref.current.getBoundingClientRect(); const w = 288;
+    const left = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8));
+    const below = r.bottom + 160 < window.innerHeight; setPos({ left, top: below ? r.bottom + 6 : null, bottom: below ? null : window.innerHeight - r.top + 6, w }); };
+  return <span ref={ref} onMouseEnter={show} onMouseLeave={() => setPos(null)} onClick={(e) => { e.stopPropagation(); pos ? setPos(null) : show(); }}
+    className="inline-flex items-center justify-center w-4 h-4 rounded-full border border-slate-600 text-[10px] leading-none text-slate-400 hover:text-sky-300 hover:border-sky-400 cursor-help shrink-0 select-none" aria-label="说明">?
+    {pos && <span style={{ position: "fixed", left: pos.left, top: pos.top ?? "auto", bottom: pos.bottom ?? "auto", width: pos.w, zIndex: 100 }}
+      className="block bg-slate-950 border border-slate-600 rounded-lg shadow-xl px-3 py-2 text-xs text-slate-200 leading-relaxed whitespace-normal text-left font-normal cursor-default">
+      {title && <span className="block font-medium text-slate-100 mb-1">{title}</span>}{text}</span>}
+  </span>;
+}
+const DESC_KEY = "dcv_perm_desc";
+// 规则取值图例
+function RuleLegend({ features }) {
+  const d = (features && features.rule_desc) || {};
+  return <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">{["allow", "disallow", "deny"].map(k =>
+    <span key={k}><span className={RULE[k][1]}>{RULE[k][0]}</span>：{d[k] || ""}</span>)}</div>;
+}
+
 // 权限规则编辑器（模板与单台自定义共用）
 function PermEditor({ features, spec, onChange, readOnly }) {
+  const [showDesc, setShowDesc] = useState(() => localStorage.getItem(DESC_KEY) !== "0");
+  const toggleDesc = (v) => { setShowDesc(v); localStorage.setItem(DESC_KEY, v ? "1" : "0"); };
   const setAll = (r) => { const n = {}; features.groups.forEach(g => g.features.forEach(f => n[f.key] = r)); ["display", "keyboard", "mouse", "pointer"].forEach(k => n[k] = "allow"); onChange(n); };
   return (
     <div>
-      {!readOnly && <div className="flex gap-2 mb-3 justify-end">
-        <Btn small color="ghost" onClick={() => setAll("allow")}>全部允许</Btn>
-        <Btn small color="ghost" onClick={() => setAll("disallow")}>全部默认禁止</Btn>
-        <Btn small color="ghost" onClick={() => setAll("deny")}>全部强制禁止</Btn>
-      </div>}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer select-none">
+          <input type="checkbox" checked={showDesc} onChange={e => toggleDesc(e.target.checked)} />显示权限说明
+        </label>
+        {!readOnly && <div className="flex gap-2 ml-auto">
+          <Btn small color="ghost" onClick={() => setAll("allow")}>全部允许</Btn>
+          <Btn small color="ghost" onClick={() => setAll("disallow")}>全部默认禁止</Btn>
+          <Btn small color="ghost" onClick={() => setAll("deny")}>全部强制禁止</Btn>
+        </div>}
+      </div>
       <div className="grid md:grid-cols-2 gap-3">
         {features.groups.map(g => (
           <div key={g.group} className="bg-slate-800/40 border border-slate-700 rounded-xl p-3">
-            <div className="text-xs font-medium text-slate-400 mb-2">{g.group}</div>
-            <div className="space-y-1">{g.features.map(f => {
+            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-400">{g.group}{!showDesc && <InfoTip title={g.group} text={g.desc} />}</div>
+            {showDesc && g.desc && <div className="text-[11px] text-slate-500 mt-0.5">{g.desc}</div>}
+            <div className={`mt-2 ${showDesc ? "space-y-2" : "space-y-1"}`}>{g.features.map(f => {
               const r = spec[f.key] || "allow";
-              return <div key={f.key} className="flex items-center justify-between gap-2 text-sm">
-                <span className="truncate" title={f.key}>{f.label}</span>
-                {readOnly ? <span className={`text-xs ${RULE[r][1]}`}>{RULE[r][0]}</span> :
-                  <select value={r} onChange={e => onChange({ ...spec, [f.key]: e.target.value })} className={`bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs ${RULE[r][1]}`}>
-                    <option value="allow">允许</option><option value="disallow">默认禁止</option><option value="deny">强制禁止</option>
-                  </select>}
+              return <div key={f.key}>
+                <div className="flex items-center justify-between gap-2 text-sm">
+                  <span className="flex items-center gap-1.5 min-w-0"><span className="truncate">{f.label}</span>{!showDesc && <InfoTip title={f.label} text={f.desc} />}
+                    {f.min_version && <span className="text-[10px] text-slate-500 shrink-0" title={`需要 DCV ${f.min_version} 及以上版本`}>≥{f.min_version}</span>}</span>
+                  {readOnly ? <span className={`text-xs shrink-0 ${RULE[r][1]}`}>{RULE[r][0]}</span> :
+                    <select value={r} onChange={e => onChange({ ...spec, [f.key]: e.target.value })} className={`shrink-0 bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs ${RULE[r][1]}`}>
+                      <option value="allow">允许</option><option value="disallow">默认禁止</option><option value="deny">强制禁止</option>
+                    </select>}
+                </div>
+                {showDesc && f.desc && <div className="text-[11px] text-slate-500 leading-relaxed mt-0.5 pr-24">{f.desc}</div>}
               </div>;
             })}</div>
           </div>
         ))}
       </div>
-      <div className="text-[11px] text-slate-500 mt-3">「默认禁止」可被其他规则放开；「强制禁止」不可被放开，适用于涉密场景。</div>
+      <div className="mt-3"><RuleLegend features={features} /></div>
     </div>
   );
 }
@@ -540,7 +575,7 @@ function Overview({ inst, reload, summary }) {
       <div className="grid grid-cols-2 gap-5">
         <div>
           <div className="flex items-center justify-between mb-1"><div className="text-xs font-medium text-slate-400">管理信息</div>{can("operator") && <button className="text-xs text-sky-400 hover:underline" onClick={() => setTags(true)}>编辑</button>}</div>
-          <KV k="分组" v={inst.group || "—"} /><KV k="使用人" v={inst.assignee || "—"} /><KV k="部门" v={inst.department || "—"} /><KV k="备注" v={inst.note || "—"} />
+          <KV k="分组" v={inst.group || "—"} /><KV k="使用人" v={inst.assignee || "—"} /><KV k="自助登录账号" v={inst.portal_user || "—"} /><KV k="部门" v={inst.department || "—"} /><KV k="备注" v={inst.note || "—"} />
           <KV k="权限配置" v={inst.template ? `${inst.template.name}（v${inst.template.version}）` : inst.perm_mode === "custom" ? "自定义" : "未配置"} />
           <KV k="合规" v={<Pill map={COMP} k={inst.compliance} />} /><KV k="健康" v={<Pill map={HEALTH} k={inst.health} />} />
         </div>
@@ -862,6 +897,7 @@ function SchedulesPage({ servers }) {
 function TemplatesPage({ templates, features, servers, reloadTpl, reload }) {
   const [view, setView] = useState("cards"); const [edit, setEdit] = useState(null); const [apply, setApply] = useState(null);
   const labelOf = (k) => { for (const g of features.groups) for (const f of g.features) if (f.key === k) return f.label; return k; };
+  const descOf = (k) => { for (const g of features.groups) for (const f of g.features) if (f.key === k) return f.desc || ""; return ""; };
   const bound = (t) => servers.filter(s => s.template && s.template.id === t.id);
   const remove = async (t) => {
     if (!await Confirm.ask({ title: "删除模板", message: `删除模板「${t.name}」？` + (t.instance_count ? `\n\n${t.instance_count} 台服务器正在使用，删除后这些服务器的权限保持不变，但转为「自定义」。` : ""), danger: true, okText: "删除" })) return;
@@ -878,7 +914,7 @@ function TemplatesPage({ templates, features, servers, reloadTpl, reload }) {
         return <div key={t.id} className="bg-slate-900 border border-slate-700 rounded-xl p-4 flex flex-col">
           <div className="flex items-center gap-2"><span className="font-semibold">{t.name}</span><LevelTag level={t.level} />{t.builtin && <span className="text-[10px] text-slate-500 border border-slate-700 rounded px-1">内置</span>}<span className="ml-auto text-[11px] text-slate-500">v{t.version}</span></div>
           <div className="text-xs text-slate-400 mt-1.5 min-h-[32px]">{t.description}</div>
-          <div className="mt-3 text-xs"><span className="text-slate-500">受限 {r.length} 项：</span>{r.length ? r.map(k => <span key={k} className={`inline-block mr-1.5 ${RULE[t.spec[k]][1]}`}>{labelOf(k)}</span>) : <span className="text-emerald-300">无</span>}</div>
+          <div className="mt-3 text-xs"><span className="text-slate-500">受限 {r.length} 项：</span>{r.length ? r.map(k => <span key={k} title={descOf(k)} className={`inline-block mr-1.5 cursor-help ${RULE[t.spec[k]][1]}`}>{labelOf(k)}</span>) : <span className="text-emerald-300">无</span>}</div>
           <div className="mt-3 text-xs text-slate-400">使用中 <span className="text-slate-200">{b.length}</span> 台{od.length > 0 && <span className="text-amber-300">，{od.length} 台待重新应用</span>}</div>
           <div className="text-[11px] text-slate-600 mt-0.5">最后修改：{t.updated_by} · {fmtT(t.updated_at)}</div>
           <div className="flex gap-1.5 mt-3 pt-3 border-t border-slate-800">
@@ -891,10 +927,10 @@ function TemplatesPage({ templates, features, servers, reloadTpl, reload }) {
         <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-x-auto scrollbar"><table className="w-full text-sm">
           <thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2 sticky left-0 bg-slate-900">功能</th>{templates.map(t => <th key={t.id} className="px-3 py-2 text-center whitespace-nowrap">{t.name}</th>)}</tr></thead>
           <tbody>{features.groups.map(g => <React.Fragment key={g.group}>
-            <tr><td colSpan={templates.length + 1} className="px-3 pt-3 pb-1 text-[11px] text-slate-500">{g.group}</td></tr>
-            {g.features.map(f => <tr key={f.key} className="border-b border-slate-800/60"><td className="px-3 py-1.5 sticky left-0 bg-slate-900">{f.label}</td>
+            <tr><td colSpan={templates.length + 1} className="px-3 pt-3 pb-1 text-[11px] text-slate-500">{g.group}{g.desc && <span className="ml-2 text-slate-600">{g.desc}</span>}</td></tr>
+            {g.features.map(f => <tr key={f.key} className="border-b border-slate-800/60"><td className="px-3 py-1.5 sticky left-0 bg-slate-900"><span className="flex items-center gap-1.5 whitespace-nowrap">{f.label}<InfoTip title={f.label} text={f.desc} /></span></td>
               {templates.map(t => { const r = t.spec[f.key] || "allow"; return <td key={t.id} className={`text-center text-xs ${RULE[r][1]}`}>{r === "allow" ? "✓" : RULE[r][0]}</td>; })}</tr>)}
-          </React.Fragment>)}</tbody></table></div>}
+          </React.Fragment>)}</tbody></table><div className="px-3 py-2 border-t border-slate-800"><RuleLegend features={features} /></div></div>}
       {edit && <TemplateEditor tpl={edit} features={features} servers={servers} onClose={() => setEdit(null)} onSaved={(t, reapply) => { setEdit(null); reloadTpl(); reload(); if (reapply) setApply({ ...t, _onlyBound: true }); }} />}
       {apply && <ApplyToServersDialog template={templates.find(t => t.id === apply.id) || apply} onlyBound={apply._onlyBound} servers={servers} onClose={() => setApply(null)} onDone={() => { setApply(null); setTimeout(reload, 1500); }} />}
     </div>
@@ -1515,6 +1551,7 @@ function LaunchDialog({ img, types, templates, summary, onClose, onDone }) {
   };
   return (
     <Modal title={`从快照创建服务器 · ${img.name}${multiRegion() ? " · " + regionShort(img.region) : ""}`} onClose={onClose} width="max-w-2xl" footer={<><Btn onClick={onClose}>取消</Btn><Btn color="green" onClick={go} disabled={busy || !name.trim()}>{busy ? "创建中…" : `创建 ${count} 台`}</Btn></>}>
+      <div className="text-xs text-slate-400 mb-3">系统盘 {Math.max(img.size_gb || 0, (CFG && CFG.volume_gb) || 0)} GB（gp3）。磁盘不能小于快照本身的 {img.size_gb} GB；设置里的默认值为 {(CFG && CFG.volume_gb) || "—"} GB，取两者中较大的。</div>
       <div className="grid grid-cols-3 gap-2 mb-4">{types.map(x => <button key={x.type} onClick={() => setType(x.type)} className={`text-left rounded-lg border p-2.5 ${type === x.type ? "border-emerald-500 bg-emerald-500/10" : "border-slate-700 hover:border-slate-500"}`}>
         <div className="font-medium text-sm">{x.type}</div><div className="text-xs text-slate-400 mt-0.5">{x.cpu} vCPU · {gib(x.memory_mib)} 内存</div><div className="text-xs text-slate-500">显存 {gib(x.gpu_memory_mib)}</div>
         <div className="mt-1"><PriceTag region={img.region} type={x.type} /></div></button>)}</div>
@@ -1547,7 +1584,7 @@ function LaunchDialog({ img, types, templates, summary, onClose, onDone }) {
 // ============================================================
 // 操作审计
 // ============================================================
-const AUDIT_ZH = { start: "开机", stop: "关机", reboot: "重启", permissions: "DCV 权限", snapshot: "快照", launch: "创建服务器", reset_password: "重置 DCV 密码", tags: "分组/使用人", rename: "重命名", login: "登录", user: "用户管理", template: "权限模板", schedule: "定时任务", share: "共享盘", capacity: "容量实测", change_type: "更改机型", migrate: "迁移可用区", host_agent: "主机组件", setup: "系统设置", terminate: "删除服务器" };
+const AUDIT_ZH = { start: "开机", stop: "关机", reboot: "重启", permissions: "DCV 权限", snapshot: "快照", launch: "创建服务器", reset_password: "重置 DCV 密码", tags: "分组/使用人", assign: "分配给用户", rename: "重命名", login: "登录", user: "用户管理", template: "权限模板", schedule: "定时任务", share: "共享盘", capacity: "容量实测", change_type: "更改机型", migrate: "迁移可用区", host_agent: "主机组件", setup: "系统设置", terminate: "删除服务器" };
 function AuditPage() {
   const [q, setQ] = useState(""); const [action, setAction] = useState(""); const [op, setOp] = useState(""); const [days, setDays] = useState(30); const [page, setPage] = useState(0);
   const [data, setData] = useState(null); const size = 100;
@@ -1588,9 +1625,9 @@ function AuditPage() {
 // ============================================================
 // 用户与角色
 // ============================================================
-const ROLE_DESC = { admin: "全部权限：用户与角色、权限模板、定时任务、从快照创建服务器、删除快照", operator: "日常运维：开关机、巡检、应用模板与自定义权限、分组与使用人、创建快照、重置 DCV 密码", viewer: "只读：查看服务器、任务、运行历史与审计" };
+const ROLE_DESC = { admin: "全部权限：用户与角色、权限模板、定时任务、从快照创建服务器、删除快照", operator: "日常运维：开关机、巡检、应用模板与自定义权限、分组与使用人、创建快照、重置 DCV 密码", viewer: "只读：查看服务器、任务、运行历史与审计", desktop: "最终用户：只看到分配给自己的服务器，可自行开机、关机、重启" };
 function UsersPage() {
-  const [users, setUsers] = useState(null); const [f, setF] = useState({ username: "", password: "", email: "", role: "operator" }); const [busy, setBusy] = useState(false); const [pwFor, setPwFor] = useState(null);
+  const [users, setUsers] = useState(null); const [f, setF] = useState({ username: "", password: "", email: "", role: "operator" }); const [busy, setBusy] = useState(false); const [pwFor, setPwFor] = useState(null); const [assignFor, setAssignFor] = useState(null);
   const load = useCallback(() => api("/api/users").then(d => setUsers(d.users)).catch(e => fail(e.message)), []);
   useEffect(() => { load(); }, [load]);
   const create = async () => { if (!f.username || !f.password) { fail("请填写用户名和初始密码"); return; } setBusy(true);
@@ -1602,19 +1639,21 @@ function UsersPage() {
     try { await del(`/api/users/${encodeURIComponent(u.username)}`); ok("已删除"); load(); } catch (e) { fail(e.message); } };
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-3 gap-3">{["admin", "operator", "viewer"].map(r => <div key={r} className="bg-slate-900 border border-slate-700 rounded-xl p-3"><div className="font-medium text-sm">{ROLE_ZH[r]}</div><div className="text-xs text-slate-400 mt-1">{ROLE_DESC[r]}</div></div>)}</div>
+      <div className="grid grid-cols-4 gap-3">{ROLES.map(r => <div key={r} className="bg-slate-900 border border-slate-700 rounded-xl p-3"><div className="font-medium text-sm">{ROLE_ZH[r]}</div><div className="text-xs text-slate-400 mt-1">{ROLE_DESC[r]}</div></div>)}</div>
       <div className="bg-slate-900 border border-slate-700 rounded-xl p-4 flex flex-wrap items-end gap-3">
         <Field label="用户名"><Input value={f.username} onChange={e => setF({ ...f, username: e.target.value })} className="w-40" /></Field>
-        <Field label="初始密码"><div className="flex gap-1"><Input value={f.password} onChange={e => setF({ ...f, password: e.target.value })} className="w-44 font-mono" /><Btn small onClick={() => setF({ ...f, password: genPassword(14) })}>生成</Btn></div></Field>
+        <Field label="初始密码（至少 12 位，含大小写、数字、符号）"><div className="flex gap-1"><Input value={f.password} onChange={e => setF({ ...f, password: e.target.value })} className="w-44 font-mono" /><Btn small onClick={() => setF({ ...f, password: genPassword(14) })}>生成</Btn></div></Field>
         <Field label="邮箱（可选）"><Input value={f.email} onChange={e => setF({ ...f, email: e.target.value })} className="w-52" /></Field>
-        <Field label="角色"><Select value={f.role} onChange={e => setF({ ...f, role: e.target.value })}>{["admin", "operator", "viewer"].map(r => <option key={r} value={r}>{ROLE_ZH[r]}</option>)}</Select></Field>
+        <Field label="角色"><Select value={f.role} onChange={e => setF({ ...f, role: e.target.value })}>{ROLES.map(r => <option key={r} value={r}>{ROLE_ZH[r]}</option>)}</Select></Field>
         <Btn color="green" onClick={create} disabled={busy}>新建用户</Btn>
       </div>
       <div className="bg-slate-900 border border-slate-700 rounded-xl overflow-hidden">
-        <table className="w-full text-sm"><thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2">用户名</th><th className="text-left px-3">角色</th><th className="text-left px-3">邮箱</th><th className="text-left px-3">状态</th><th className="text-left px-3">创建时间</th><th className="text-right px-3">操作</th></tr></thead>
+        <table className="w-full text-sm"><thead className="text-xs text-slate-400 border-b border-slate-700"><tr><th className="text-left px-3 py-2">用户名</th><th className="text-left px-3">角色</th><th className="text-left px-3">分配的服务器</th><th className="text-left px-3">邮箱</th><th className="text-left px-3">状态</th><th className="text-left px-3">创建时间</th><th className="text-right px-3">操作</th></tr></thead>
           <tbody>{users && users.map(u => { const me = ME && u.username === ME.username; return <tr key={u.username} className="border-b border-slate-800">
             <td className="px-3 py-2.5 font-medium">{u.username}{me && <span className="text-[10px] text-sky-300 ml-1.5">（我）</span>}</td>
-            <td className="px-3"><Select value={u.role} disabled={me} onChange={e => setRole(u, e.target.value)}>{["admin", "operator", "viewer"].map(r => <option key={r} value={r}>{ROLE_ZH[r]}</option>)}</Select></td>
+            <td className="px-3"><Select value={u.role} disabled={me} onChange={e => setRole(u, e.target.value)}>{ROLES.map(r => <option key={r} value={r}>{ROLE_ZH[r]}</option>)}</Select></td>
+            <td className="px-3">{u.role === "desktop" ? <div className="flex items-center gap-2"><span className="text-xs text-slate-300 truncate max-w-[16rem]" title={(u.instances || []).map(i => i.name || i.instance_id).join("、")}>{(u.instances || []).length ? (u.instances || []).map(i => i.name || i.instance_id).join("、") : <span className="text-amber-300">未分配</span>}</span><Btn small color="ghost" onClick={() => setAssignFor(u)}>分配</Btn></div>
+              : (u.instances || []).length ? <span className="text-xs text-slate-500" title="角色不是桌面用户，分配不生效">{u.instances.length} 台（不生效）</span> : <span className="text-slate-600">—</span>}</td>
             <td className="px-3 text-slate-400">{u.email || "—"}</td>
             <td className="px-3">{u.enabled ? <span className="text-emerald-300 text-xs">启用</span> : <span className="text-slate-500 text-xs">已禁用</span>}</td>
             <td className="px-3 text-slate-400 whitespace-nowrap">{fmtT(u.created)}</td>
@@ -1622,15 +1661,30 @@ function UsersPage() {
           </tr>; })}</tbody></table>
       </div>
       {pwFor && <UserPasswordDialog user={pwFor} onClose={() => setPwFor(null)} />}
+      {assignFor && <AssignServersDialog user={assignFor} onClose={() => setAssignFor(null)} onDone={() => { setAssignFor(null); load(); }} />}
     </div>
   );
+}
+
+function AssignServersDialog({ user, onClose, onDone }) {
+  const [servers, setServers] = useState(null); const [sel, setSel] = useState((user.instances || []).map(i => i.instance_id)); const [busy, setBusy] = useState(false);
+  useEffect(() => { api("/api/instances").then(d => setServers(d.instances)).catch(e => fail(e.message)); }, []);
+  const taken = (servers || []).filter(s => sel.includes(s.instance_id) && s.portal_user && s.portal_user !== user.username);
+  const go = async () => { setBusy(true); try { const r = await put(`/api/users/${encodeURIComponent(user.username)}/instances`, { instance_ids: sel }); ok(`已保存：新增 ${r.added} 台，收回 ${r.removed} 台`); onDone(); } catch (e) { fail(e.message); setBusy(false); } };
+  return <Modal title={`分配服务器 · ${user.username}`} width="max-w-2xl" onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="green" onClick={go} disabled={busy || !servers}>保存</Btn></>}>
+    <div className="space-y-3">
+      <div className="text-xs text-slate-400">该用户登录后只能看到这里勾选的服务器，并可自行开机、关机、重启。一台服务器只能分配给一个用户。</div>
+      {servers ? <ServerPicker servers={servers} value={sel} onChange={setSel} /> : <div className="text-slate-500 text-sm py-6 text-center">加载中…</div>}
+      {taken.length > 0 && <div className="text-xs text-amber-300">以下服务器当前分配给其他用户，保存后将改为 {user.username}：{taken.map(s => `${s.name || s.instance_id}（${s.portal_user}）`).join("、")}</div>}
+    </div>
+  </Modal>;
 }
 
 function UserPasswordDialog({ user, onClose }) {
   const [pw, setPw] = useState(genPassword(14)); const [busy, setBusy] = useState(false);
   const go = async () => { setBusy(true); try { await post(`/api/users/${encodeURIComponent(user.username)}/password`, { password: pw }); ok(`已重置 ${user.username} 的密码为：${pw}`); onClose(); } catch (e) { fail(e.message); setBusy(false); } };
   return <Modal title={`重置平台登录密码 · ${user.username}`} onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="amber" onClick={go} disabled={busy || !pw}>确认重置</Btn></>}>
-    <Field label="新密码" hint="至少 8 位，含大写、小写字母和数字"><div className="flex gap-2"><Input value={pw} onChange={e => setPw(e.target.value)} className="flex-1 font-mono" /><Btn small onClick={() => setPw(genPassword(14))}>重新生成</Btn><Btn small onClick={() => { navigator.clipboard.writeText(pw); ok("已复制"); }}>复制</Btn></div></Field>
+    <Field label="新密码" hint="至少 12 位，含大写字母、小写字母、数字和符号"><div className="flex gap-2"><Input value={pw} onChange={e => setPw(e.target.value)} className="flex-1 font-mono" /><Btn small onClick={() => setPw(genPassword(14))}>重新生成</Btn><Btn small onClick={() => { navigator.clipboard.writeText(pw); ok("已复制"); }}>复制</Btn></div></Field>
   </Modal>;
 }
 
@@ -1639,7 +1693,7 @@ function MyPasswordDialog({ onClose }) {
   const go = async () => { if (b !== c) { fail("两次输入的新密码不一致"); return; } setBusy(true); try { await post("/api/me/password", { old_password: a, new_password: b }); ok("密码已修改，下次登录请使用新密码"); onClose(); } catch (e) { fail(e.message); setBusy(false); } };
   return <Modal title="修改我的登录密码" onClose={onClose} footer={<><Btn onClick={onClose}>取消</Btn><Btn color="amber" onClick={go} disabled={busy || !a || !b}>确认修改</Btn></>}>
     <div className="space-y-3"><Field label="原密码"><Input type="password" value={a} onChange={e => setA(e.target.value)} className="w-full" /></Field>
-      <Field label="新密码" hint="至少 8 位，含大写、小写字母和数字"><Input type="password" value={b} onChange={e => setB(e.target.value)} className="w-full" /></Field>
+      <Field label="新密码" hint="至少 12 位，含大写字母、小写字母、数字和符号"><Input type="password" value={b} onChange={e => setB(e.target.value)} className="w-full" /></Field>
       <Field label="确认新密码"><Input type="password" value={c} onChange={e => setC(e.target.value)} className="w-full" /></Field></div>
   </Modal>;
 }
@@ -2002,10 +2056,61 @@ function SetupWizard({ current, onClose, mode = "edit", managed = [], home }) {
   </Modal>;
 }
 
+// ============================================================
+// 桌面用户：只显示分配给自己的服务器，可开机、关机、重启
+// ============================================================
+function DesktopShell() {
+  const [data, setData] = useState(null); const [pw, setPw] = useState(false); const [acting, setActing] = useState({});
+  const load = useCallback(() => api("/api/my/instances").then(setData).catch(e => fail(e.message)), []);
+  useEffect(() => { api("/api/me").then(m => { if (m.role !== "desktop") { ME = m; localStorage.setItem("dcv_me", JSON.stringify(m)); location.reload(); } }).catch(() => {}); load(); }, [load]);
+  useEffect(() => { const busy = data && data.instances.some(i => ["pending", "stopping"].includes(i.state) || i.busy);
+    const t = setInterval(() => { if (!document.hidden) load(); }, busy ? 4000 : 15000); return () => clearInterval(t); }, [load, data]);
+  const act = async (i, action) => {
+    const zh = { start: "开机", stop: "关机", reboot: "重启" }[action];
+    if (action !== "start" && !await Confirm.ask({ title: `${zh} · ${i.name || i.instance_id}`, message: action === "stop" ? "关机会断开当前的远程连接，未保存的工作会丢失。确认关机？" : "重启会断开当前的远程连接，未保存的工作会丢失。确认重启？", danger: action === "stop", okText: zh })) return;
+    setActing(a => ({ ...a, [i.instance_id]: true }));
+    try { await post(`/api/my/instances/${i.instance_id}/power`, { action }); ok(`已提交${zh}，状态稍后更新`); setTimeout(load, 1500); }
+    catch (e) { fail(e.message); } finally { setActing(a => ({ ...a, [i.instance_id]: false })); }
+  };
+  const addr = (i) => i.dcv_url ? i.dcv_url.replace("https://", "").replace(/\/$/, "") : "";
+  return (
+    <div className="min-h-screen">
+      <header className="flex items-center justify-between px-6 py-3.5 border-b border-slate-800 bg-slate-950">
+        <div><div className="font-bold">我的云桌面</div><div className="text-[11px] text-slate-500">DCV 企业管理平台</div></div>
+        <div className="flex items-center gap-4 text-sm"><span className="text-slate-300">{ME && ME.username}</span>
+          {data && data.cognito && <button className="text-xs text-slate-400 hover:text-white" onClick={() => setPw(true)}>修改密码</button>}
+          <button className="text-xs text-slate-400 hover:text-white" onClick={logout}>退出</button><Btn small color="ghost" onClick={load}>刷新</Btn></div>
+      </header>
+      <main className="p-6 max-w-4xl mx-auto space-y-3">
+        {!data ? <div className="text-center text-slate-500 py-16">加载中…</div>
+          : data.instances.length === 0 ? <div className="bg-slate-900 border border-slate-700 rounded-xl p-10 text-center text-slate-400">还没有分配给你的云桌面，请联系 IT 管理员。</div>
+          : data.instances.map(i => { const busy = acting[i.instance_id] || i.busy || ["pending", "stopping", "shutting-down"].includes(i.state);
+            return <div key={i.instance_id} className="bg-slate-900 border border-slate-700 rounded-xl p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0"><div className="font-medium text-base truncate">{i.name || i.instance_id}</div>
+                  <div className="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-4 gap-y-1"><StateDot state={i.state} /><span>{i.instance_type}{i.gpu ? ` · ${i.gpu}` : ""}</span><span>已运行 {uptimeOf(i)}</span>{i.busy && <span className="text-sky-300">有任务正在执行</span>}</div></div>
+                <div className="flex gap-2 shrink-0">
+                  {i.state === "stopped" && <Btn color="green" disabled={busy} onClick={() => act(i, "start")}>开机</Btn>}
+                  {i.state === "running" && <><Btn color="amber" disabled={busy} onClick={() => act(i, "reboot")}>重启</Btn><Btn color="red" disabled={busy} onClick={() => act(i, "stop")}>关机</Btn></>}
+                  {busy && i.state !== "running" && i.state !== "stopped" && <span className="text-xs text-slate-400 self-center">请稍候…</span>}
+                </div>
+              </div>
+              {i.state === "running" && (addr(i) ? <div className="mt-3 bg-slate-800/40 border border-slate-700 rounded-lg p-3 text-sm flex items-center justify-between">
+                <span>连接地址 <span className="font-mono text-xs text-slate-300 ml-2">{addr(i)}</span></span>
+                <div className="flex gap-2"><Btn small color="ghost" onClick={() => { navigator.clipboard.writeText(addr(i)); ok("已复制"); }}>复制</Btn><a href={i.dcv_url} target="_blank"><Btn small color="blue">浏览器打开</Btn></a></div>
+              </div> : <div className="mt-3 text-xs text-slate-500">开机后正在分配地址，稍后刷新。</div>)}
+              {i.state === "pending" && <div className="mt-3 text-xs text-slate-400">正在开机，通常 1–3 分钟后可以连接。</div>}
+            </div>; })}
+      </main>
+      {pw && <MyPasswordDialog onClose={() => setPw(false)} />}
+    </div>
+  );
+}
+
 function App() {
   const [authed, setAuthed] = useState(!!TOKEN && !!ME);
   useEffect(() => { const h = () => setAuthed(false); window.addEventListener("dcv-logout", h); return () => window.removeEventListener("dcv-logout", h); }, []);
-  return <>{authed ? <Shell /> : <Login onOk={() => setAuthed(true)} />}<Toasts /><ConfirmHost /></>;
+  return <>{authed ? (ME && ME.role === "desktop" ? <DesktopShell /> : <Shell />) : <Login onOk={() => setAuthed(true)} />}<Toasts /><ConfirmHost /></>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);

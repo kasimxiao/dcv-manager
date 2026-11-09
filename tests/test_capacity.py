@@ -70,6 +70,10 @@ def fake_ec2(monkeypatch, full_subnets, other_error=False):
     calls = []
 
     class E:
+        def describe_images(self, **kw):
+            return {"Images": [{"RootDeviceName": "/dev/sda1",
+                                "BlockDeviceMappings": [{"DeviceName": "/dev/sda1", "Ebs": {"VolumeSize": 100}}]}]}
+
         def run_instances(self, **kw):
             sub = kw["NetworkInterfaces"][0]["SubnetId"]
             calls.append(sub)
@@ -201,3 +205,21 @@ def test_ami_name_is_aws_compliant():
     n = aws_service.ami_safe_name("全功能测试快照 v2 (设计)", "i-09184731af230a0a7")
     assert re.fullmatch(r"[A-Za-z0-9()./_-]{3,128}", n), n
     assert aws_service.ami_safe_name("中文", "i-abc12345678").startswith("dcv-snapshot-")
+
+
+def test_launch_volume_not_smaller_than_image_snapshot(monkeypatch):
+    """镜像系统盘 100GB 时，不能按设置的 60GB 创建，否则 AWS 报 InvalidBlockDeviceMapping。"""
+    a, _ = fake_ec2(monkeypatch, set())
+    seen = {}
+
+    orig = a.ec2.run_instances
+
+    def spy(**kw):
+        seen.update(kw)
+        return orig(**kw)
+
+    monkeypatch.setattr(a.ec2, "run_instances", spy)
+    monkeypatch.setattr(a, "LAUNCH_VOLUME_GB", 60)
+    a.launch_from_image("ami-1", "g6f.xlarge", "n")
+    bdm = seen["BlockDeviceMappings"][0]
+    assert bdm["DeviceName"] == "/dev/sda1" and bdm["Ebs"]["VolumeSize"] == 100

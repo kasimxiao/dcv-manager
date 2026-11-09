@@ -68,7 +68,20 @@ def verify(token: str) -> dict:
 
 
 # ---------------- 用户管理 ----------------
-ROLES = ["admin", "operator", "viewer"]  # 对应 Cognito 用户组；权限从高到低
+# 与 deploy/platform.yaml 中用户池的密码策略一致；先在本地校验，给出明确提示，
+# 也避免「用户已建好、设置密码失败」留下半成品用户。
+PASSWORD_HINT = "至少 12 位，需包含大写字母、小写字母、数字和符号"
+_SYMBOLS = set("^$*.[]{}()?\"!@#%&/\\,><':;|_~`=+- ")
+
+
+def check_password(pw: str):
+    pw = pw or ""
+    if (len(pw) < 12 or not any(c.isupper() for c in pw) or not any(c.islower() for c in pw)
+            or not any(c.isdigit() for c in pw) or not any(c in _SYMBOLS for c in pw)):
+        raise ValueError(f"密码不符合要求：{PASSWORD_HINT}")
+
+
+ROLES = ["admin", "operator", "viewer", "desktop"]  # 对应 Cognito 用户组；权限从高到低（desktop：桌面用户，只能开关分配给自己的服务器）
 
 
 def role_from_claims(claims: dict) -> str:
@@ -132,6 +145,9 @@ def list_users() -> list:
 
 
 def create_user(username: str, password: str, email: str = "", role: str = "viewer") -> dict:
+    check_password(password)
+    if role not in ROLES:
+        raise ValueError("角色不合法")
     attrs = []
     if email:
         attrs = [{"Name": "email", "Value": email}, {"Name": "email_verified", "Value": "true"}]
@@ -141,17 +157,26 @@ def create_user(username: str, password: str, email: str = "", role: str = "view
         MessageAction="SUPPRESS",
         UserAttributes=attrs,
     )
-    _client.admin_set_user_password(
-        UserPoolId=COGNITO_USER_POOL_ID,
-        Username=username,
-        Password=password,
-        Permanent=True,
-    )
-    set_role(username, role)
+    try:
+        _client.admin_set_user_password(
+            UserPoolId=COGNITO_USER_POOL_ID,
+            Username=username,
+            Password=password,
+            Permanent=True,
+        )
+        set_role(username, role)
+    except Exception:
+        # 回滚：不留下没有密码、没有角色的半成品用户（未分组用户会被当作只读）
+        try:
+            _client.admin_delete_user(UserPoolId=COGNITO_USER_POOL_ID, Username=username)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     return {"username": username, "role": role}
 
 
 def set_password(username: str, password: str):
+    check_password(password)
     _client.admin_set_user_password(
         UserPoolId=COGNITO_USER_POOL_ID, Username=username, Password=password, Permanent=True
     )
@@ -178,10 +203,11 @@ def change_own_password(username: str, old_password: str, new_password: str):
         )
     except _client.exceptions.NotAuthorizedException:
         raise ValueError("原密码错误")
+    check_password(new_password)
     access = resp["AuthenticationResult"]["AccessToken"]
     try:
         _client.change_password(PreviousPassword=old_password, ProposedPassword=new_password, AccessToken=access)
     except _client.exceptions.InvalidPasswordException:
-        raise ValueError("新密码不符合策略：至少 8 位，需含大写、小写字母和数字")
+        raise ValueError(f"新密码不符合要求：{PASSWORD_HINT}")
     except _client.exceptions.LimitExceededException:
         raise ValueError("尝试次数过多，请稍后再试")

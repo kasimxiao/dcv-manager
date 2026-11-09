@@ -168,8 +168,9 @@ def _name_from_tags(tags):
 
 
 # 管理用标签：分组、使用人、部门、备注。直接存于 EC2 标签，AWS 控制台与成本分摊报表也能使用。
+# portal_user：分配给哪个平台账号（桌面用户角色）自助开关机；只能由管理员修改，迁移时随标签带到新服务器。
 MGMT_TAGS = {"group": "dcv:group", "assignee": "dcv:assignee", "department": "dcv:department", "note": "dcv:note",
-             "pending_template": "dcv:pending-template"}
+             "pending_template": "dcv:pending-template", "portal_user": "dcv:user"}
 
 # 实例列表短缓存：100 台规模下前端多处同时读取，避免频繁调用 EC2/SSM API
 _list_cache = {"ts": 0.0, "items": None}
@@ -600,6 +601,20 @@ def launch_from_image(image_id, instance_type, name, mgmt: dict = None, count: i
         return _launch_from_image(image_id, instance_type, name, mgmt, count, subnets, config.region_cfg(region))
 
 
+def _root_block_device(image_id):
+    """按镜像的根卷返回 BlockDeviceMappings：磁盘不得小于镜像快照，否则 AWS 直接拒绝创建。"""
+    img = ec2.describe_images(ImageIds=[image_id])["Images"][0]
+    root = img.get("RootDeviceName") or "/dev/sda1"
+    snap_gb = 0
+    for bdm in img.get("BlockDeviceMappings", []):
+        if bdm.get("DeviceName") == root and bdm.get("Ebs"):
+            snap_gb = int(bdm["Ebs"].get("VolumeSize") or 0)
+            break
+    size = max(int(LAUNCH_VOLUME_GB), snap_gb)
+    return [{"DeviceName": root,
+             "Ebs": {"VolumeSize": size, "VolumeType": "gp3", "DeleteOnTermination": True}}], size, snap_gb
+
+
 def _launch_from_image(image_id, instance_type, name, mgmt, count, subnets, rcfg):
     """从快照(AMI)启动新实例（可批量），自动纳管（打 dcv 标签），可附带分组/使用人等管理标签。
 
@@ -617,6 +632,11 @@ def _launch_from_image(image_id, instance_type, name, mgmt, count, subnets, rcfg
     if not rcfg["subnet_ids"] or not rcfg["security_group_id"]:
         raise ValueError("该区域尚未完成网络设置，请先在「系统设置」中配置")
     plan = subnets or [[rcfg["subnet_ids"][0]]] * count
+    bdm, vol_gb, snap_gb = _root_block_device(image_id)
+    if vol_gb > int(LAUNCH_VOLUME_GB):
+        import logging
+        logging.getLogger("dcv.aws").info("镜像 %s 的系统盘 %s GB 大于设置的 %s GB，按镜像大小创建",
+                                          image_id, snap_gb, LAUNCH_VOLUME_GB)
     ids, placed, errors = [], [], []
     for n in range(count):
         cand = plan[n] if n < len(plan) else plan[-1]
@@ -626,8 +646,7 @@ def _launch_from_image(image_id, instance_type, name, mgmt, count, subnets, rcfg
                 resp = ec2.run_instances(
                     ImageId=image_id, InstanceType=instance_type, MinCount=1, MaxCount=1,
                     IamInstanceProfile={"Name": LAUNCH_PROFILE}, **({"KeyName": rcfg["key_name"]} if rcfg["key_name"] else {}),
-                    BlockDeviceMappings=[{"DeviceName": "/dev/sda1",
-                                          "Ebs": {"VolumeSize": LAUNCH_VOLUME_GB, "VolumeType": "gp3", "DeleteOnTermination": True}}],
+                    BlockDeviceMappings=bdm,
                     NetworkInterfaces=[{"DeviceIndex": 0, "SubnetId": sub, "AssociatePublicIpAddress": True, "Groups": [rcfg["security_group_id"]]}],
                     TagSpecifications=[{"ResourceType": "instance", "Tags": [
                         {"Key": "Name", "Value": f"{name}-{n + 1:02d}" if count > 1 else name},

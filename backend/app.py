@@ -1,6 +1,7 @@
 """DCV 企业管理平台 - FastAPI 后端入口。
 
 角色（Cognito 用户组）：
+  desktop  桌面用户：只能查看分配给自己的服务器，并对其开机、关机、重启
   viewer   只读：服务器、任务、历史、审计
   operator 运维：开关机、巡检、应用模板/自定义权限、标签、快照创建、重置 DCV 密码
   admin    管理员：以上全部 + 用户、权限模板、定时任务、从快照创建服务器、删除快照
@@ -26,7 +27,7 @@ import eb_scheduler
 import history_service
 import inspect_service
 import jobs
-from dcv_features import FEATURE_GROUPS, DEFAULT_SPEC, ALL_FEATURE_KEYS
+from dcv_features import FEATURE_GROUPS, DEFAULT_SPEC, ALL_FEATURE_KEYS, RULE_DESC
 
 if config.cognito_enabled():
     import cognito_auth
@@ -39,8 +40,8 @@ log = logging.getLogger("dcv.app")
 app = FastAPI(title="DCV 企业管理平台", version="2.0")
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
 
-ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
-ROLE_ZH = {"viewer": "只读", "operator": "运维", "admin": "管理员"}
+ROLE_RANK = {"desktop": 0, "viewer": 1, "operator": 2, "admin": 3}
+ROLE_ZH = {"desktop": "桌面用户", "viewer": "只读", "operator": "运维", "admin": "管理员"}
 
 # ---------------- 鉴权 ----------------
 _tokens: Dict[str, float] = {}
@@ -77,7 +78,7 @@ def role(min_role: str):
     return dep
 
 
-VIEWER, OPERATOR, ADMIN = role("viewer"), role("operator"), role("admin")
+DESKTOP, VIEWER, OPERATOR, ADMIN = role("desktop"), role("viewer"), role("operator"), role("admin")
 
 
 def _fail(prefix, e, code=500):
@@ -293,12 +294,12 @@ def login_new_password(req: NewPasswordReq):
 
 
 @app.get("/api/me")
-def me(user=Depends(VIEWER)):
+def me(user=Depends(DESKTOP)):
     return user
 
 
 @app.post("/api/me/password")
-def change_my_password(req: MyPasswordReq, user=Depends(VIEWER)):
+def change_my_password(req: MyPasswordReq, user=Depends(DESKTOP)):
     if not cognito_auth:
         raise HTTPException(status_code=400, detail="未启用 Cognito，请通过环境变量修改管理口令")
     try:
@@ -312,7 +313,7 @@ def change_my_password(req: MyPasswordReq, user=Depends(VIEWER)):
 # ---------------- 元数据 ----------------
 @app.get("/api/features")
 def features(_=Depends(VIEWER)):
-    return {"groups": FEATURE_GROUPS, "default_spec": DEFAULT_SPEC}
+    return {"groups": FEATURE_GROUPS, "default_spec": DEFAULT_SPEC, "rule_desc": RULE_DESC}
 
 
 @app.get("/api/config")
@@ -328,6 +329,7 @@ def get_cfg(_=Depends(VIEWER)):
         "inspect_interval_min": config.INSPECT_INTERVAL_MIN,
         "idle_hours": config.IDLE_HOURS,
         "max_launch_count": config.MAX_LAUNCH_COUNT,
+        "volume_gb": config.LAUNCH_VOLUME_GB,
         "allowed_types": config.ALLOWED_INSTANCE_TYPES,
         "candidate_types": config.CANDIDATE_TYPES,
         "default_fallback": config.DEFAULT_FALLBACK,
@@ -491,6 +493,41 @@ def rename(instance_id: str, req: RenameReq, user=Depends(OPERATOR)):
 
 @app.post("/api/instances/{instance_id}/power")
 def power(instance_id: str, req: PowerReq, user=Depends(OPERATOR)):
+    try:
+        jid = jobs.start_power([instance_id], req.action, user["username"])
+    except Exception as e:  # noqa: BLE001
+        _fail("电源操作失败", e)
+    return {"ok": True, "job_id": jid}
+
+
+# ---------------- 桌面用户自助（只能操作分配给自己的服务器） ----------------
+_MY_FIELDS = ["instance_id", "name", "state", "instance_type", "gpu", "region", "az", "public_ip",
+              "dcv_url", "running_since", "fallback_from"]
+_MY_ACTIONS = {"start", "stop", "reboot"}
+
+
+def _my_instances(username, use_cache=True):
+    return [i for i in aws_service.list_instances(use_cache=use_cache) if i.get("portal_user") == username]
+
+
+@app.get("/api/my/instances")
+def my_instances(user=Depends(DESKTOP)):
+    try:
+        mine = _my_instances(user["username"])
+        busy = store.running_jobs_for([i["instance_id"] for i in mine])
+    except Exception as e:  # noqa: BLE001
+        _fail("查询服务器失败", e)
+    return {"instances": [{k: i.get(k) for k in _MY_FIELDS} | {"busy": i["instance_id"] in busy} for i in mine],
+            "cognito": bool(cognito_auth), "generated_at": time.time()}
+
+
+@app.post("/api/my/instances/{instance_id}/power")
+def my_power(instance_id: str, req: PowerReq, user=Depends(DESKTOP)):
+    if req.action not in _MY_ACTIONS:
+        raise HTTPException(status_code=400, detail="不支持的操作")
+    # 授权以 EC2 上的实时标签为准，避免缓存中刚被收回的分配仍然有效
+    if not any(i["instance_id"] == instance_id for i in _my_instances(user["username"], use_cache=False)):
+        raise HTTPException(status_code=403, detail="这台服务器没有分配给你")
     try:
         jid = jobs.start_power([instance_id], req.action, user["username"])
     except Exception as e:  # noqa: BLE001
@@ -938,9 +975,56 @@ def _guard_last_admin(username, losing_admin: bool):
 @app.get("/api/users")
 def list_users(_=Depends(ADMIN)):
     try:
-        return {"users": _cog().list_users(), "roles": [{"key": k, "name": ROLE_ZH[k]} for k in ROLE_RANK]}
+        users = _cog().list_users()
+        assigned = {}
+        for i in aws_service.list_instances():
+            if i.get("portal_user"):
+                assigned.setdefault(i["portal_user"], []).append({"instance_id": i["instance_id"], "name": i["name"]})
+        for u in users:
+            u["instances"] = assigned.get(u["username"], [])
+        return {"users": users, "roles": [{"key": k, "name": ROLE_ZH[k]} for k in ROLE_RANK]}
     except Exception as e:  # noqa: BLE001
         _fail("读取用户失败", e)
+
+
+class UserInstancesReq(BaseModel):
+    instance_ids: List[str]
+
+
+def _assign_instances(username, instance_ids):
+    """把服务器分配给用户（标签 dcv:user）：列表中的设为该用户，原先属于该用户但不在列表中的收回。
+
+    一台服务器只分配给一个用户；已分配给他人的会改为该用户。返回 (新增, 收回)。
+    """
+    insts = {i["instance_id"]: i for i in aws_service.list_instances(use_cache=False)}
+    unknown = [x for x in instance_ids if x not in insts]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"不是平台管理的服务器：{'、'.join(unknown)}")
+    want = set(instance_ids)
+    add = [x for x in want if insts[x].get("portal_user") != username]
+    drop = [x for x, i in insts.items() if i.get("portal_user") == username and x not in want]
+    if add:
+        aws_service.set_mgmt_tags(add, {"portal_user": username})
+    if drop:
+        aws_service.set_mgmt_tags(drop, {"portal_user": ""})
+    return add, drop, insts
+
+
+@app.put("/api/users/{username}/instances")
+def set_user_instances(username: str, req: UserInstancesReq, user=Depends(ADMIN)):
+    try:
+        cur = next((u for u in _cog().list_users() if u["username"] == username), None)
+        if not cur:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        add, drop, insts = _assign_instances(username, list(dict.fromkeys(req.instance_ids)))
+    except Exception as e:  # noqa: BLE001
+        _fail("分配服务器失败", e, 400)
+    for iid in add:
+        prev = insts[iid].get("portal_user")
+        _audit(iid, "assign", user, f"分配给用户 {username}" + (f"（原属 {prev}）" if prev else ""))
+    for iid in drop:
+        _audit(iid, "assign", user, f"从用户 {username} 收回")
+    return {"ok": True, "added": len(add), "removed": len(drop)}
 
 
 @app.post("/api/users")
@@ -1008,7 +1092,13 @@ def delete_user(username: str, user=Depends(ADMIN)):
         _cog().delete_user(username)
     except Exception as e:  # noqa: BLE001
         _fail("删除用户失败", e, 400)
-    _audit("-", "user", user, f"删除用户 {username}")
+    try:
+        _, dropped, _ = _assign_instances(username, [])
+        extra = f"，收回 {len(dropped)} 台服务器" if dropped else ""
+    except Exception as e:  # noqa: BLE001
+        log.exception("收回用户 %s 的服务器失败", username)
+        extra = f"；收回其服务器失败（{e}），请在服务器上清除标签 dcv:user"
+    _audit("-", "user", user, f"删除用户 {username}{extra}")
     return {"ok": True}
 
 

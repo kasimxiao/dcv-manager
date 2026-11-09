@@ -34,9 +34,11 @@ Parameters:
   CloudFrontPrefixListId:
     Type: String
     Description: com.amazonaws.global.cloudfront.origin-facing 托管前缀列表 ID（deploy.sh 自动查询）
+  # 由 deploy.sh 传入具体 AMI：首次部署取 Amazon Linux 2023 最新版，之后固定沿用，
+  # 不随 AWS 发布新 AMI 变化。否则每次部署都会重建平台服务器，而 CloudFront
+  # 的 VPC 源站已被分发占用、无法指向新实例，堆栈会更新失败并回滚。
   AmiId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Type: AWS::EC2::Image::Id
   DataVolumeGb:
     Type: Number
     Default: 20
@@ -589,6 +591,9 @@ Resources:
   GroupViewer:
     Type: AWS::Cognito::UserPoolGroup
     Properties: { UserPoolId: !Ref UserPool, GroupName: viewer, Description: 只读, Precedence: 3 }
+  GroupDesktop:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { UserPoolId: !Ref UserPool, GroupName: desktop, Description: 桌面用户（只能开关分配给自己的服务器）, Precedence: 4 }
 
 Outputs:
   Url:

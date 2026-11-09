@@ -81,9 +81,23 @@ VER=$(date +%Y%m%d-%H%M%S); ${AWS} s3 cp "${PKG}" "s3://${BUCKET}/dcv-manager/re
 echo "代码包 $(du -h "${PKG}" | cut -f1)，版本 ${VER}"; rm -f "${PKG}"
 
 say "创建或更新 CloudFormation 堆栈（首次约 15–25 分钟：NAT、CloudFront VPC 源站与分发较慢）"
-PARAMS=(VpcMode=${MODE} VpcCidr=${VPC_CIDR} ExistingVpcId=${VPC} ExistingSubnetId=${SUBNET} InstanceType=${ITYPE}
-        ArtifactBucket=${BUCKET} ArtifactKey=${KEY} CloudFrontPrefixListId=${PL})
 EXISTS=$(${AWS} cloudformation describe-stacks --stack-name "${STACK}" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo NONE)
+# 平台服务器的 AMI：已部署过就沿用原值，避免 AWS 发布新 AMI 时重建实例
+# （CloudFront VPC 源站被分发占用，无法改指向新实例，会导致堆栈回滚）。
+# 操作系统补丁通过 SSM 在机器上 dnf update，不需要换 AMI。
+AMI=""
+if [ "${EXISTS}" != NONE ]; then
+  CUR_IID=$(${AWS} cloudformation describe-stack-resource --stack-name "${STACK}" \
+    --logical-resource-id PlatformInstance --query StackResourceDetail.PhysicalResourceId --output text 2>/dev/null || true)
+  case "${CUR_IID}" in i-*) AMI=$(${AWS} ec2 describe-instances --instance-ids "${CUR_IID}" \
+    --query 'Reservations[0].Instances[0].ImageId' --output text 2>/dev/null || true);; esac
+fi
+case "${AMI}" in ami-*) ;; *) AMI=$(${AWS} ssm get-parameter \
+    --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 \
+    --query Parameter.Value --output text);; esac
+echo "平台服务器镜像 ${AMI}"
+PARAMS=(VpcMode=${MODE} VpcCidr=${VPC_CIDR} ExistingVpcId=${VPC} ExistingSubnetId=${SUBNET} InstanceType=${ITYPE}
+        ArtifactBucket=${BUCKET} ArtifactKey=${KEY} CloudFrontPrefixListId=${PL} AmiId=${AMI})
 case "${EXISTS}" in ROLLBACK_COMPLETE|ROLLBACK_FAILED) echo "上次创建失败（${EXISTS}），先删除"; ${AWS} cloudformation delete-stack --stack-name "${STACK}"; ${AWS} cloudformation wait stack-delete-complete --stack-name "${STACK}"; EXISTS=NONE;; esac
 set +e
 ${AWS} cloudformation deploy --stack-name "${STACK}" --template-file "${ROOT}/deploy/platform.yaml" \

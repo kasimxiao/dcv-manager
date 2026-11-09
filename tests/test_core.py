@@ -235,3 +235,37 @@ def test_cron_wrapping():
     assert eb_scheduler._wrap_cron("30 8 ? * MON-FRI *") == "cron(30 8 ? * MON-FRI *)"
     assert eb_scheduler._wrap_cron("rate(1 hour)") == "rate(1 hour)"
     assert eb_scheduler._unwrap_cron("cron(0 9 * * ? *)") == "0 9 * * ? *"
+
+
+def test_every_permission_has_description():
+    """权限编辑器依赖每个分组和每个权限项的说明文字。"""
+    from dcv_features import FEATURE_GROUPS, RULE_DESC
+    for g in FEATURE_GROUPS:
+        assert g.get("desc"), g["group"]
+        for f in g["features"]:
+            assert f.get("desc"), f["key"]
+    assert set(RULE_DESC) == {"allow", "disallow", "deny"}
+
+
+def test_detect_owner_prefers_host_over_stale_record(monkeypatch):
+    """主机属主被手工改过时，下发权限不能按平台旧记录把属主改回去。"""
+    import dcv_service as D
+    import db
+    monkeypatch.setattr(db, "get_meta", lambda i: {"owner": "Administrator"})
+    monkeypatch.setattr(D.aws_service, "run_powershell",
+                        lambda *a, **k: {"status": "Success",
+                                         "stdout": "Session: 'console' (owner:dcvuser type:console)",
+                                         "stderr": ""})
+    assert D._detect_owner.__wrapped__("i-1") == "dcvuser"
+
+
+def test_detect_owner_falls_back_to_record_when_host_unreachable(monkeypatch):
+    import dcv_service as D
+    import db
+    monkeypatch.setattr(db, "get_meta", lambda i: {"owner": "dcvuser"})
+
+    def boom(*a, **k):
+        raise RuntimeError("SSM 不可达")
+
+    monkeypatch.setattr(D.aws_service, "run_powershell", boom)
+    assert D._detect_owner.__wrapped__("i-1") == "dcvuser"
